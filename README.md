@@ -30,7 +30,7 @@ A self-contained WireGuard VPN manager for [Firewalla](https://firewalla.com) th
 
 ## Option A — Docker (easiest)
 
-A multi-arch image (`amd64` / `arm64` / `armv7`) is published automatically to GitHub Container Registry. You only need the compose file — no repo clone, no build step.
+You only need the compose file. On first run Docker fetches the source directly from GitHub and builds the image locally (~2 minutes). Every subsequent start is instant because the image is cached on your machine.
 
 ### 1. Download the compose file
 
@@ -76,8 +76,8 @@ docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions
 # Follow live logs
 docker compose logs -f --tail 50
 
-# Update to the latest image
-docker compose pull && docker compose up -d
+# Rebuild from latest source and restart
+docker compose build --no-cache && docker compose up -d
 ```
 
 ### Full docker-compose.yml examples

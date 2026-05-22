@@ -8,6 +8,9 @@
 #   # Edit this file — fill in PIA_USER and PIA_PASS below
 #   docker compose up -d
 #
+# First run builds the image directly from GitHub (~2 min). Subsequent
+# starts are instant because the image is cached locally.
+#
 # ⚠  This file will contain your PIA password — do not commit it to git or
 #    share it publicly. Add docker-compose.yml to your .gitignore if needed.
 #
@@ -15,16 +18,17 @@
 # Force reconnect: docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
 # Show status:     docker compose exec pia-wg /app/pia-wg-firewalla.sh status
 # List regions:    docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions
-# Update image:    docker compose pull && docker compose up -d
+# Update image:    docker compose build --no-cache && docker compose up -d
 # =============================================================================
 version: "3.9"
 
 services:
   pia-wg:
-    # Pre-built multi-arch image (amd64 / arm64 / armv7) — pulled automatically.
-    # To build from source instead, comment the image line and uncomment build.
-    image: ghcr.io/maximumworf/firewalla-pia_wg:latest
-    # build: .
+    # Builds the image directly from the GitHub repo — no registry login needed.
+    # The image is cached locally after the first build.
+    build:
+      context: https://github.com/MaximumWorf/firewalla-pia_wg.git
+    image: pia-wg:latest
     container_name: pia-wg
     restart: unless-stopped
 
