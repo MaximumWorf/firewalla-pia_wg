@@ -84,6 +84,11 @@ PIA_USER="${PIA_USER:-}"
 PIA_PASS="${PIA_PASS:-}"
 # Leave blank for standard accounts; set to your PIA Dedicated IP token for DIP
 DIP_TOKEN="${DIP_TOKEN:-}"
+# Optional manual DIP server override — skips the API lookup entirely.
+# Find these in your PIA account portal next to your Dedicated IP.
+DIP_HOSTNAME="${DIP_HOSTNAME:-}"
+DIP_SERVER_IP="${DIP_SERVER_IP:-}"
+DIP_PORT="${DIP_PORT:-1337}"
 
 # ── Derive interface name (max 15 chars, Linux IFNAMSIZ limit) ─────────────────
 WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
@@ -190,17 +195,25 @@ get_pia_token() {
   [[ -z "${PIA_USER}" ]] && die "PIA_USER is not set"
   [[ -z "${PIA_PASS}" ]] && die "PIA_PASS is not set"
 
-  log "Authenticating with PIA..."
-  local resp
-  resp=$(curl_retry -s --max-time 20 --location \
-    --request POST "${PIA_TOKEN_URL}" \
-    --form "username=${PIA_USER}" \
-    --form "password=${PIA_PASS}") \
-    || die "Cannot reach PIA auth API after retries — check network connectivity"
+  log "Authenticating with PIA (v2 API)..."
+  local resp token
+  # Use JSON body — matches the reference pia-wg.sh implementation
+  resp=$(curl_retry -s --max-time 20 \
+    --request POST \
+    --header "Content-Type: application/json" \
+    --data "{\"username\":\"${PIA_USER}\",\"password\":\"${PIA_PASS}\"}" \
+    "${PIA_TOKEN_URL}") || true
+  token=$(echo "${resp}" | jq -r '.token // empty' 2>/dev/null || true)
 
-  local token
-  token=$(echo "${resp}" | jq -r '.token // empty')
-  [[ -z "${token}" ]] && die "PIA authentication failed. Response: ${resp}"
+  if [[ -z "${token}" ]]; then
+    log "v2 auth failed, trying v3 API..."
+    resp=$(curl_retry -s --max-time 20 \
+      --user "${PIA_USER}:${PIA_PASS}" \
+      "https://privateinternetaccess.com/gtoken/generateToken") || true
+    token=$(echo "${resp}" | jq -r '.token // empty' 2>/dev/null || true)
+  fi
+
+  [[ -z "${token}" ]] && die "PIA authentication failed. Last response: ${resp}"
 
   printf '%s' "${token}" > "${token_file}"
   chmod 600 "${token_file}"
@@ -209,39 +222,54 @@ get_pia_token() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dedicated IP — resolve server details from DIP token
+# Dedicated IP — find server CN and IP for the DIP assignment
 # ─────────────────────────────────────────────────────────────────────────────
 
 get_dip_server() {
   local auth_token="$1"
 
-  log "Resolving Dedicated IP server info..."
+  # Allow manual override — skip API entirely if the user already knows their server
+  if [[ -n "${DIP_HOSTNAME:-}" && -n "${DIP_SERVER_IP:-}" ]]; then
+    info "Using manually specified DIP server: ${DIP_HOSTNAME} (${DIP_SERVER_IP})"
+    echo "${DIP_HOSTNAME}|${DIP_SERVER_IP}"
+    return 0
+  fi
 
-  # Build JSON body safely so special characters in the token don't break it
-  local json_body
+  log "Resolving Dedicated IP server via PIA API..."
+  local json_body resp http_code
   json_body=$(jq -n --arg t "${DIP_TOKEN}" '{"tokens":[$t]}')
 
-  local resp
-  resp=$(curl_retry -s --max-time 20 \
+  # Capture HTTP status code alongside the body for better error messages
+  resp=$(curl_retry -s --max-time 20 --location \
+    --write-out "\n%{http_code}" \
     --header "Authorization: Token ${auth_token}" \
     --header "Content-Type: application/json" \
     --data "${json_body}" \
-    "${PIA_DIP_API_URL}") \
-    || die "Cannot reach PIA dedicated IP API after retries — check network connectivity"
+    "${PIA_DIP_API_URL}") || {
+      die "curl could not reach ${PIA_DIP_API_URL}. Check connectivity, or set DIP_HOSTNAME and DIP_SERVER_IP manually."
+    }
 
-  local status
-  status=$(echo "${resp}" | jq -r '.[0].status // empty')
-  if [[ "${status}" != "active" ]]; then
-    err "PIA DIP API response: ${resp}"
-    die "Dedicated IP not active (status='${status}'). Verify DIP_TOKEN is correct and the IP is active in your PIA account."
+  http_code=$(echo "${resp}" | tail -1)
+  resp=$(echo "${resp}" | head -n -1)
+
+  if [[ "${http_code}" != "200" ]]; then
+    err "DIP API returned HTTP ${http_code}. Body: ${resp}"
+    die "DIP API failed (HTTP ${http_code}). Verify DIP_TOKEN is correct, or set DIP_HOSTNAME and DIP_SERVER_IP to skip this call."
   fi
 
-  echo "${resp}" | jq '.[0]' > "${DATA_DIR}/dip_server.json"
+  local status
+  status=$(echo "${resp}" | jq -r '.[0].status // empty' 2>/dev/null || true)
+  if [[ "${status}" != "active" ]]; then
+    err "DIP API response: ${resp}"
+    die "Dedicated IP status='${status}' (expected 'active'). Verify DIP_TOKEN is correct and the IP is active in your PIA account."
+  fi
 
   local dip_cn dip_ip
   dip_cn=$(echo "${resp}" | jq -r '.[0].cn')
   dip_ip=$(echo "${resp}" | jq -r '.[0].ip')
   info "Dedicated IP server: ${dip_cn} (${dip_ip})"
+
+  echo "${resp}" | jq '.[0]' > "${DATA_DIR}/dip_server.json"
   echo "${dip_cn}|${dip_ip}"
 }
 
@@ -289,6 +317,10 @@ select_server() {
   [[ -z "${wg_servers}" || "${wg_servers}" == "null" ]] && \
     die "No WireGuard servers in region '${region}'"
 
+  # WireGuard port — read from server list groups (reference: pia-wg.sh)
+  local wg_port
+  wg_port=$(echo "${servers}" | jq -r '.groups.wg[0].ports[0] // 1337')
+
   # Pick the server with lowest latency (ping all, take fastest)
   local best_cn best_ip best_ms=9999
   while IFS='|' read -r cn ip; do
@@ -306,8 +338,8 @@ select_server() {
     best_ms="N/A"
   fi
 
-  info "Selected server: ${best_cn} (${best_ip}) — ${best_ms}ms"
-  echo "${best_cn}|${best_ip}"
+  info "Selected server: ${best_cn} (${best_ip}) port ${wg_port} — ${best_ms}ms"
+  echo "${best_cn}|${best_ip}|${wg_port}"
 }
 
 list_regions() {
@@ -356,30 +388,35 @@ register_key() {
   local server_ip="$3"
   local pubkey="$4"
   local is_dip="${5:-false}"
+  local server_port="${6:-1337}"
 
-  log "Registering WireGuard key with ${server_cn} (${server_ip})..."
+  log "Registering WireGuard key with ${server_cn} (${server_ip}:${server_port})..."
 
   local auth_args=()
   if [[ "${is_dip}" == "true" ]]; then
-    # Dedicated IP uses HTTP Basic auth with the DIP token
+    # DIP auth: HTTP Basic with "dedicated_ip_{token}" as user, server IP as password
+    # This matches the pia-foss/manual-connections reference implementation
     auth_args=(--user "dedicated_ip_${DIP_TOKEN}:${server_ip}")
   else
     auth_args=(--data-urlencode "pt=${auth_token}")
   fi
 
   local resp
-  resp=$(curl -s --max-time 20 -G \
-    --connect-to "${server_cn}::${server_ip}:" \
+  # Use --resolve (reference: pia-wg.sh) instead of --connect-to for broader curl compat
+  resp=$(curl_retry -sS --max-time 15 -G \
+    --resolve "${server_cn}:${server_port}:${server_ip}" \
     --cacert "${DATA_DIR}/ca.rsa.4096.crt" \
     "${auth_args[@]}" \
     --data-urlencode "pubkey=${pubkey}" \
-    "https://${server_cn}:${WG_KEY_PORT}/addKey") \
-    || die "Network error during WireGuard key registration"
+    "https://${server_cn}:${server_port}/addKey") \
+    || die "curl failed during WireGuard key registration with ${server_cn}"
 
   local status
   status=$(echo "${resp}" | jq -r '.status // empty')
-  [[ "${status}" != "OK" ]] && \
-    die "Key registration failed (status=${status}). Response: ${resp}"
+  if [[ "${status}" != "OK" ]]; then
+    err "addKey response: ${resp}"
+    die "Key registration failed (status='${status}'). If you see an auth error, run with --new-token."
+  fi
 
   echo "${resp}" > "${DATA_DIR}/server.json"
   info "Key registered — assigned peer IP: $(echo "${resp}" | jq -r '.peer_ip')"
@@ -601,20 +638,21 @@ do_setup() {
   local auth_token
   auth_token=$(get_pia_token "${force_token}")
 
-  local server_cn server_ip is_dip=false
+  local server_cn server_ip server_port=1337 is_dip=false
   if [[ -n "${DIP_TOKEN}" ]]; then
     is_dip=true
     local pair; pair=$(get_dip_server "${auth_token}")
-    server_cn="${pair%|*}"
+    server_cn="${pair%%|*}"
     server_ip="${pair#*|}"
+    # DIP port: use override if set, otherwise default 1337
+    server_port="${DIP_PORT:-1337}"
   else
     local pair; pair=$(select_server "${PIA_REGION}")
-    server_cn="${pair%|*}"
-    server_ip="${pair#*|}"
+    IFS='|' read -r server_cn server_ip server_port <<< "${pair}"
   fi
 
   local server_resp
-  server_resp=$(register_key "${auth_token}" "${server_cn}" "${server_ip}" "${pubkey}" "${is_dip}")
+  server_resp=$(register_key "${auth_token}" "${server_cn}" "${server_ip}" "${pubkey}" "${is_dip}" "${server_port}")
 
   # Always build Firewalla profiles (they go to DATA_DIR at minimum)
   local fw_name

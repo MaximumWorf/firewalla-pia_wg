@@ -60,6 +60,11 @@ services:
       # Paste the token from your PIA account dashboard to use a Dedicated IP.
       # When set, PIA_REGION is ignored — the server is fixed by PIA.
       DIP_TOKEN: ""
+      # Optional manual DIP server override — skips the API lookup entirely.
+      # Find these in your PIA account portal next to your Dedicated IP.
+      DIP_HOSTNAME: ""
+      DIP_SERVER_IP: ""
+      DIP_PORT: "1337"
 
       # ── Region (ignored when DIP_TOKEN is set) ───────────────────────────
       # Run `docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions`
