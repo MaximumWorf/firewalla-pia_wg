@@ -1,0 +1,851 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pia-wg-firewalla.sh
+# PIA WireGuard VPN for Firewalla — dedicated IP support + auto token refresh
+# Sources: pia-foss/manual-connections, triffid/pia-wg, JasonMeudt/Firewalla-pia-wireguard
+# =============================================================================
+set -euo pipefail
+
+readonly VERSION="1.0.0"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── PIA API endpoints ──────────────────────────────────────────────────────────
+readonly PIA_TOKEN_URL="https://www.privateinternetaccess.com/api/client/v2/token"
+readonly PIA_SERVER_LIST_URL="https://serverlist.piaservers.net/vpninfo/servers/v6"
+readonly PIA_DIP_API_URL="https://www.privateinternetaccess.com/api/client/v2/dedicated_ip"
+readonly WG_KEY_PORT=1337
+
+# ── Firewalla profile paths ────────────────────────────────────────────────────
+readonly FW_PROFILE_DIR="/home/pi/.firewalla/run/wg_profile"
+readonly FW_OVERLAY_DIR="/media/home-rw/overlay/pi/.firewalla/run/wg_profile"
+
+# ── Embedded PIA CA certificate (RSA 4096) ─────────────────────────────────────
+# Source: https://github.com/pia-foss/manual-connections/blob/master/ca.rsa.4096.crt
+readonly PIA_CA_CERT='-----BEGIN CERTIFICATE-----
+MIIHqzCCBZOgAwIBAgIJAJ0u+vODZJntMA0GCSqGSIb3DQEBDQUAMIHoMQswCQYD
+VQQGEwJVUzELMAkGA1UECBMCQ0ExEzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNV
+BAoTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIElu
+dGVybmV0IEFjY2VzczEgMB4GA1UEAxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3Mx
+IDAeBgNVBCkTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkB
+FiBzZWN1cmVAcHJpdmF0ZWludGVybmV0YWNjZXNzLmNvbTAeFw0xNDA0MTcxNzQw
+MzNaFw0zNDA0MTIxNzQwMzNaMIHoMQswCQYDVQQGEwJVUzELMAkGA1UECBMCQ0Ex
+EzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNVBAoTF1ByaXZhdGUgSW50ZXJuZXQg
+QWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UE
+AxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3MxIDAeBgNVBCkTF1ByaXZhdGUgSW50
+ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkBFiBzZWN1cmVAcHJpdmF0ZWludGVy
+bmV0YWNjZXNzLmNvbTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALVk
+hjumaqBbL8aSgj6xbX1QPTfTd1qHsAZd2B97m8Vw31c/2yQgZNf5qZY0+jOIHULN
+De4R9TIvyBEbvnAg/OkPw8n/+ScgYOeH876VUXzjLDBnDb8DLr/+w9oVsuDeFJ9K
+V2UFM1OYX0SnkHnrYAN2QLF98ESK4NCSU01h5zkcgmQ+qKSfA9Ny0/UpsKPBFqsQ
+25NvjDWFhCpeqCHKUJ4Be27CDbSl7lAkBuHMPHJs8f8xPgAbHRXZOxVCpayZ2SND
+fCwsnGWpWFoMGvdMbygngCn6jA/W1VSFOlRlfLuuGe7QFfDwA0jaLCxuWt/BgZyl
+p7tAzYKR8lnWmtUCPm4+BtjyVDYtDCiGBD9Z4P13RFWvJHw5aapx/5W/CuvVyI7p
+Kwvc2IT+KPxCUhH1XI8ca5RN3C9NoPJJf6qpg4g0rJH3aaWkoMRrYvQ+5PXXYUzj
+tRHImghRGd/ydERYoAZXuGSbPkm9Y/p2X8unLcW+F0xpJD98+ZI+tzSsI99Zs5wi
+jSUGYr9/j18KHFTMQ8n+1jauc5bCCegN27dPeKXNSZ5riXFL2XX6BkY68y58UaNz
+meGMiUL9BOV1iV+PMb7B7PYs7oFLjAhh0EdyvfHkrh/ZV9BEhtFa7yXp8XR0J6vz
+1YV9R6DYJmLjOEbhU8N0gc3tZm4Qz39lIIG6w3FDAgMBAAGjggFUMIIBUDAdBgNV
+HQ4EFgQUrsRtyWJftjpdRM0+925Y6Cl08SUwggEfBgNVHSMEggEWMIIBEoAUrsRt
+yWJftjpdRM0+925Y6Cl08SWhge6kgeswgegxCzAJBgNVBAYTAlVTMQswCQYDVQQI
+EwJDQTETMBEGA1UEBxMKTG9zQW5nZWxlczEgMB4GA1UEChMXUHJpdmF0ZSBJW50Z
+cm5ldCBBY2Nlc3MxIDAeBgNVBAsTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAw
+HgYDVQQDExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UEKRMXUHJpdmF0
+ZSBJbnRlcm5ldCBBY2Nlc3MxLzAtBgkqhkiG9w0BCQEWIHNlY3VyZUBwcml2YXRl
+aW50ZXJuZXRhY2Nlc3MuY29tggkAnS7684Nkme0wDAYDVR0TBAUwAwEB/zANBgkq
+hkiG9w0BAQ0FAAOCAgEAJsfhsPk3r8kLXLxY+v+vHzbr4ufNtqnL9/1Uuf8NrsCt
+pXAoyZ0YqfbkWx3NHTZ7OE9ZRhdMP/RqHQE1p4N4Sa1nZKhTKasV6KhHDqSCt/dv
+Em89xWm2MVA7nyzQxVlHa9AkcBaemcXEiyT19XdpiXOP4Vhs+J1R5m8zQOxZlV1G
+tF9vsXmJqWZpOVPmZ8f35BCsYPvv4yMewnrtAC8PFEK/bOPeYcKN50bol22QYaZu
+LfpkHfNiFTnfMh8sl/ablPyNY7DUNiP5DRcMdIwmfGQxR5WEQoHL3yPJ42LkB5zs
+6jIm26DGNXfwura/mi105+ENH1CaROtRYwkiHb08U6qLXXJz80mWJkT90nr8Asj3
+5xN2cUppg74nG3YVav/38P48T56hG1NHbYF5uOCske19F6wi9maUoto/3vEr0rnX
+JUp2KODmKdvBI7co245lHBABWikk8VfejQSlCtDBXn644ZMtAdoxKNfR2WTFVEwJ
+iyd1Fzx0yujuiXDROLhISLQDRjVVAvawrAtLZWYK31bY7KlezPlQnl/D9Asxe85l
+8jO5+0LdJ6VyOs/Hd4w52alDW/MFySDZSfQHMTIc30hLBJ8OnCEIvluVQQ2UQvoW
++no177N9L2Y+M9TcTA62ZyMXShHQGeh20rb4kK8f+iFX8NxtdHVSkxMEFSfDDyQ=
+-----END CERTIFICATE-----'
+
+# ── Configurable defaults (all overridable via .env) ───────────────────────────
+DATA_DIR="${DATA_DIR:-/data/pia-wg}"
+PIA_REGION="${PIA_REGION:-us_east}"
+PROFILE_NAME="${PROFILE_NAME:-PIA_WG}"
+TOKEN_TTL="${TOKEN_TTL:-72000}"            # 20 h — PIA tokens valid ~24 h
+SERVER_LIST_TTL="${SERVER_LIST_TTL:-86400}"
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
+HANDSHAKE_MAX_AGE="${HANDSHAKE_MAX_AGE:-120}"
+MAX_DOWN_TIME="${MAX_DOWN_TIME:-300}"
+MAX_RECONNECT_ATTEMPTS="${MAX_RECONNECT_ATTEMPTS:-5}"
+VPN_CHECK_IP="${VPN_CHECK_IP:-9.9.9.9}"
+WG_DNS_OVERRIDE="${WG_DNS_OVERRIDE:-}"
+# Set to "true" when Firewalla manages the WireGuard interface (no wg-quick)
+WG_MANAGED_BY_FIREWALLA="${WG_MANAGED_BY_FIREWALLA:-false}"
+# Credentials — must be set in .env or environment
+PIA_USER="${PIA_USER:-}"
+PIA_PASS="${PIA_PASS:-}"
+# Leave blank for standard accounts; set to your PIA Dedicated IP token for DIP
+DIP_TOKEN="${DIP_TOKEN:-}"
+
+# ── Derive interface name (max 15 chars, Linux IFNAMSIZ limit) ─────────────────
+WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
+
+# ── Terminal colours (disabled when not a tty) ─────────────────────────────────
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
+  BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+else
+  RED=''; YELLOW=''; GREEN=''; BLUE=''; CYAN=''; BOLD=''; NC=''
+fi
+
+log()  { echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $*"; }
+info() { echo -e "${GREEN}[INFO ]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN ]${NC} $*"; }
+err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ── Graceful shutdown ──────────────────────────────────────────────────────────
+_shutdown() {
+  log "Shutting down..."
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
+    wg_down 2>/dev/null || true
+  fi
+  exit 0
+}
+trap _shutdown SIGTERM SIGINT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+check_deps() {
+  local missing=()
+  for cmd in curl jq wg ip; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  done
+  [[ ${#missing[@]} -gt 0 ]] && die "Missing required tools: ${missing[*]}. Install wireguard-tools, curl, jq."
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
+    command -v wg-quick &>/dev/null || die "wg-quick not found (required for standalone mode)"
+  fi
+}
+
+load_env() {
+  # Load .env from script dir, then from DATA_DIR (Docker volume wins)
+  [[ -f "${SCRIPT_DIR}/.env" ]]  && { info "Loading ${SCRIPT_DIR}/.env"; source "${SCRIPT_DIR}/.env"; }
+  [[ -f "${DATA_DIR}/.env" ]]    && { info "Loading ${DATA_DIR}/.env";    source "${DATA_DIR}/.env";    }
+  # Re-derive interface name after env load in case PROFILE_NAME changed
+  WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
+}
+
+init_data_dir() {
+  mkdir -p "${DATA_DIR}"
+  chmod 700 "${DATA_DIR}"
+  printf '%s' "${PIA_CA_CERT}" > "${DATA_DIR}/ca.rsa.4096.crt"
+}
+
+# Returns seconds since file was last modified, or 999999 if it doesn't exist.
+file_age() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo 999999; return; }
+  echo $(( $(date +%s) - $(stat -c %Y "$f") ))
+}
+
+is_iface_up() {
+  ip link show "${WG_IFACE}" &>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIA authentication
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_pia_token() {
+  local force="${1:-false}"
+  local token_file="${DATA_DIR}/token"
+
+  if [[ "$force" != "true" && -f "$token_file" ]]; then
+    local age; age=$(file_age "$token_file")
+    if (( age < TOKEN_TTL )); then
+      info "Reusing cached PIA token (age ${age}s / TTL ${TOKEN_TTL}s)"
+      cat "$token_file"
+      return 0
+    fi
+    info "Token expired (${age}s old), refreshing..."
+  fi
+
+  [[ -z "${PIA_USER}" ]] && die "PIA_USER is not set"
+  [[ -z "${PIA_PASS}" ]] && die "PIA_PASS is not set"
+
+  log "Authenticating with PIA..."
+  local resp
+  resp=$(curl -s --max-time 20 --location \
+    --request POST "${PIA_TOKEN_URL}" \
+    --form "username=${PIA_USER}" \
+    --form "password=${PIA_PASS}") \
+    || die "Network error contacting PIA token API"
+
+  local token
+  token=$(echo "${resp}" | jq -r '.token // empty')
+  [[ -z "${token}" ]] && die "PIA authentication failed. Response: ${resp}"
+
+  printf '%s' "${token}" > "${token_file}"
+  chmod 600 "${token_file}"
+  info "PIA token obtained and cached"
+  echo "${token}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dedicated IP — resolve server details from DIP token
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_dip_server() {
+  local auth_token="$1"
+
+  log "Resolving Dedicated IP server info..."
+  local resp
+  resp=$(curl -s --max-time 20 \
+    --header "Authorization: Token ${auth_token}" \
+    --header "Content-Type: application/json" \
+    --data "{\"tokens\":[\"${DIP_TOKEN}\"]}" \
+    "${PIA_DIP_API_URL}") \
+    || die "Network error contacting PIA dedicated IP API"
+
+  local status
+  status=$(echo "${resp}" | jq -r '.[0].status // empty')
+  [[ "${status}" != "active" ]] && \
+    die "Dedicated IP not active (status=${status}). Response: ${resp}"
+
+  echo "${resp}" | jq '.[0]' > "${DATA_DIR}/dip_server.json"
+
+  local dip_cn dip_ip
+  dip_cn=$(echo "${resp}" | jq -r '.[0].cn')
+  dip_ip=$(echo "${resp}" | jq -r '.[0].ip')
+  info "Dedicated IP server: ${dip_cn} (${dip_ip})"
+  echo "${dip_cn}|${dip_ip}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Server list & region selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+fetch_server_list() {
+  local force="${1:-false}"
+  local cache="${DATA_DIR}/servers.json"
+
+  if [[ "$force" != "true" && -f "$cache" ]]; then
+    local age; age=$(file_age "$cache")
+    if (( age < SERVER_LIST_TTL )); then
+      info "Reusing cached server list (age ${age}s)"
+      cat "$cache"
+      return 0
+    fi
+  fi
+
+  log "Fetching PIA server list..."
+  # The server list has a signature on the second line — strip it
+  local resp
+  resp=$(curl -s --max-time 20 "${PIA_SERVER_LIST_URL}" | head -1) \
+    || die "Failed to fetch PIA server list"
+
+  echo "${resp}" > "$cache"
+  info "Server list cached"
+  echo "${resp}"
+}
+
+select_server() {
+  local region="$1"
+  local servers; servers=$(fetch_server_list)
+
+  local region_json
+  region_json=$(echo "${servers}" | jq -r --arg r "$region" \
+    '[.regions[] | select(.id==$r)] | .[0]')
+
+  [[ -z "${region_json}" || "${region_json}" == "null" ]] && \
+    die "Region '${region}' not found. Run '$0 list-regions' to see available regions."
+
+  local wg_servers
+  wg_servers=$(echo "${region_json}" | jq -r '.servers.wg // empty')
+  [[ -z "${wg_servers}" || "${wg_servers}" == "null" ]] && \
+    die "No WireGuard servers in region '${region}'"
+
+  # Pick the server with lowest latency (ping all, take fastest)
+  local best_cn best_ip best_ms=9999
+  while IFS='|' read -r cn ip; do
+    local ms
+    ms=$(ping -c 1 -W 1 -q "${ip}" 2>/dev/null | awk -F'/' '/avg/{print int($5)}' || echo 9999)
+    if (( ms < best_ms )); then
+      best_ms=$ms; best_cn=$cn; best_ip=$ip
+    fi
+  done < <(echo "${wg_servers}" | jq -r '.[] | "\(.cn)|\(.ip)"')
+
+  # Fall back to first server if all pings failed
+  if [[ -z "${best_cn:-}" ]]; then
+    best_cn=$(echo "${wg_servers}" | jq -r '.[0].cn')
+    best_ip=$(echo "${wg_servers}" | jq -r '.[0].ip')
+    best_ms="N/A"
+  fi
+
+  info "Selected server: ${best_cn} (${best_ip}) — ${best_ms}ms"
+  echo "${best_cn}|${best_ip}"
+}
+
+list_regions() {
+  local servers; servers=$(fetch_server_list)
+  echo -e "\n${BOLD}Available PIA WireGuard regions:${NC}\n"
+  echo "${servers}" | jq -r \
+    '[.regions[] | select(.servers.wg != null)] | sort_by(.name)[] | "  \(.id)\t\(.name)"' \
+    | column -t -s $'\t'
+  echo
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WireGuard key management
+# ─────────────────────────────────────────────────────────────────────────────
+
+ensure_wg_keys() {
+  local force="${1:-false}"
+  local privkey_file="${DATA_DIR}/private.key"
+  local pubkey_file="${DATA_DIR}/public.key"
+
+  if [[ "$force" != "true" && -f "${privkey_file}" && -f "${pubkey_file}" ]]; then
+    info "Reusing existing WireGuard keypair"
+    cat "${pubkey_file}"
+    return 0
+  fi
+
+  log "Generating new WireGuard keypair..."
+  local privkey pubkey
+  privkey=$(wg genkey)
+  pubkey=$(echo "${privkey}" | wg pubkey)
+  printf '%s' "${privkey}" > "${privkey_file}"
+  printf '%s' "${pubkey}"  > "${pubkey_file}"
+  chmod 600 "${privkey_file}"
+  chmod 644 "${pubkey_file}"
+  info "WireGuard keypair generated"
+  echo "${pubkey}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Key registration with PIA
+# ─────────────────────────────────────────────────────────────────────────────
+
+register_key() {
+  local auth_token="$1"
+  local server_cn="$2"
+  local server_ip="$3"
+  local pubkey="$4"
+  local is_dip="${5:-false}"
+
+  log "Registering WireGuard key with ${server_cn} (${server_ip})..."
+
+  local auth_args=()
+  if [[ "${is_dip}" == "true" ]]; then
+    # Dedicated IP uses HTTP Basic auth with the DIP token
+    auth_args=(--user "dedicated_ip_${DIP_TOKEN}:${server_ip}")
+  else
+    auth_args=(--data-urlencode "pt=${auth_token}")
+  fi
+
+  local resp
+  resp=$(curl -s --max-time 20 -G \
+    --connect-to "${server_cn}::${server_ip}:" \
+    --cacert "${DATA_DIR}/ca.rsa.4096.crt" \
+    "${auth_args[@]}" \
+    --data-urlencode "pubkey=${pubkey}" \
+    "https://${server_cn}:${WG_KEY_PORT}/addKey") \
+    || die "Network error during WireGuard key registration"
+
+  local status
+  status=$(echo "${resp}" | jq -r '.status // empty')
+  [[ "${status}" != "OK" ]] && \
+    die "Key registration failed (status=${status}). Response: ${resp}"
+
+  echo "${resp}" > "${DATA_DIR}/server.json"
+  info "Key registered — assigned peer IP: $(echo "${resp}" | jq -r '.peer_ip')"
+  echo "${resp}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config file builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Resolve DNS list: honour override, fall back to PIA servers, then hardcoded fallback.
+_resolve_dns() {
+  local server_resp="$1"
+  if [[ -n "${WG_DNS_OVERRIDE}" ]]; then
+    echo "${WG_DNS_OVERRIDE}"
+    return
+  fi
+  local dns
+  dns=$(echo "${server_resp}" | jq -r '[.dns_servers[]?] | join(",")' 2>/dev/null || true)
+  [[ -z "${dns}" || "${dns}" == "null" ]] && dns="10.0.0.243,10.0.0.242"
+  echo "${dns}"
+}
+
+# Write the standard wg-quick .conf used in standalone mode (interface = WG_IFACE)
+write_wg_conf() {
+  local server_resp="$1"
+  local server_ip="$2"
+
+  local privkey peer_ip server_key server_port dns
+  privkey=$(cat "${DATA_DIR}/private.key")
+  peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  server_key=$(echo "${server_resp}" | jq -r '.server_key')
+  server_port=$(echo "${server_resp}"| jq -r '.server_port')
+  dns=$(_resolve_dns "${server_resp}")
+
+  for var in peer_ip server_key server_port; do
+    val="${!var}"
+    [[ -z "$val" || "$val" == "null" ]] && die "Missing ${var} in server response"
+  done
+
+  local conf="${DATA_DIR}/${WG_IFACE}.conf"
+  cat > "${conf}" <<EOF
+[Interface]
+Address = ${peer_ip}
+PrivateKey = ${privkey}
+DNS = ${dns}
+
+[Peer]
+PublicKey = ${server_key}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = ${server_ip}:${server_port}
+PersistentKeepalive = 25
+EOF
+  chmod 600 "${conf}"
+
+  # Persist connection metadata for watchdog / status
+  cat > "${DATA_DIR}/connection.json" <<EOF
+{
+  "profile_name":  "${PROFILE_NAME}",
+  "wg_iface":      "${WG_IFACE}",
+  "server_cn":     "${server_ip}",
+  "server_ip":     "${server_ip}",
+  "server_port":   ${server_port},
+  "peer_ip":       "${peer_ip}",
+  "dns":           "${dns}",
+  "established_at": $(date +%s)
+}
+EOF
+  info "WireGuard config written: ${conf}"
+  echo "${conf}"
+}
+
+# Build Firewalla-specific profile files (.conf + .json + .settings)
+build_firewalla_profiles() {
+  local server_resp="$1"
+  local server_ip="$2"
+
+  local privkey peer_ip server_key server_port dns dns_json
+  privkey=$(cat "${DATA_DIR}/private.key")
+  peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  server_key=$(echo "${server_resp}" | jq -r '.server_key')
+  server_port=$(echo "${server_resp}"| jq -r '.server_port')
+  dns=$(_resolve_dns "${server_resp}")
+  dns_json=$(echo "${dns}" | tr ',' '\n' | jq -R . | jq -sc .)
+
+  local name="${PROFILE_NAME}"
+
+  # .conf — wg-quick format (Firewalla reads this directly)
+  cat > "${DATA_DIR}/${name}.conf" <<EOF
+[Interface]
+Address = ${peer_ip}
+PrivateKey = ${privkey}
+DNS = ${dns}
+
+[Peer]
+PublicKey = ${server_key}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = ${server_ip}:${server_port}
+PersistentKeepalive = 25
+EOF
+  chmod 600 "${DATA_DIR}/${name}.conf"
+
+  # .json — Firewalla VPN peer metadata
+  cat > "${DATA_DIR}/${name}.json" <<EOF
+{
+  "peers": [
+    {
+      "publicKey": "${server_key}",
+      "endpoint": "${server_ip}:${server_port}",
+      "persistentKeepalive": 25,
+      "allowedIPs": ["0.0.0.0/0", "::/0"]
+    }
+  ],
+  "addresses": ["${peer_ip}"],
+  "privateKey": "${privkey}",
+  "dns": ${dns_json}
+}
+EOF
+  chmod 600 "${DATA_DIR}/${name}.json"
+
+  # .settings — Firewalla routing policy
+  cat > "${DATA_DIR}/${name}.settings" <<EOF
+{
+  "serverSubnets": [],
+  "overrideDefaultRoute": true,
+  "routeDNS": true,
+  "strictVPN": true,
+  "createdDate": $(date +%s),
+  "subtype": "wireguard"
+}
+EOF
+  chmod 644 "${DATA_DIR}/${name}.settings"
+
+  info "Firewalla profile files written: ${name}.{conf,json,settings}"
+  echo "${name}"
+}
+
+deploy_to_firewalla() {
+  local name="$1"
+  local deployed=0
+
+  for fw_dir in "${FW_PROFILE_DIR}" "${FW_OVERLAY_DIR}"; do
+    # Only deploy if the parent directory exists (i.e. we're on Firewalla)
+    if [[ -d "$(dirname "${fw_dir}")" ]]; then
+      mkdir -p "${fw_dir}"
+      cp -f "${DATA_DIR}/${name}.conf"     "${fw_dir}/${name}.conf"
+      cp -f "${DATA_DIR}/${name}.json"     "${fw_dir}/${name}.json"
+      cp -f "${DATA_DIR}/${name}.settings" "${fw_dir}/${name}.settings"
+      info "Deployed to ${fw_dir}"
+      (( deployed++ )) || true
+    fi
+  done
+
+  if (( deployed == 0 )); then
+    warn "Firewalla profile directories not found — profile files remain in ${DATA_DIR}"
+    warn "Copy ${PROFILE_NAME}.{conf,json,settings} to ${FW_PROFILE_DIR} manually."
+  else
+    info "────────────────────────────────────────────────────────────"
+    info "Profile '${name}' deployed to Firewalla."
+    info "Activate it: Firewalla app → VPN Client → WireGuard → ${name}"
+    info "────────────────────────────────────────────────────────────"
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WireGuard interface management (standalone mode only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+wg_up() {
+  local conf="${DATA_DIR}/${WG_IFACE}.conf"
+  [[ -f "${conf}" ]] || die "Config not found: ${conf}"
+
+  if is_iface_up; then
+    log "Interface ${WG_IFACE} already exists — syncing config"
+    _wg_syncconf "${conf}"
+    return 0
+  fi
+
+  log "Bringing up ${WG_IFACE}..."
+  wg-quick up "${conf}" || die "wg-quick failed to bring up ${WG_IFACE}"
+  info "${WG_IFACE} is up"
+}
+
+wg_down() {
+  local conf="${DATA_DIR}/${WG_IFACE}.conf"
+  if is_iface_up; then
+    log "Bringing down ${WG_IFACE}..."
+    wg-quick down "${conf}" 2>/dev/null \
+      || ip link delete "${WG_IFACE}" 2>/dev/null \
+      || true
+  fi
+}
+
+# Strip wg-quick directives so `wg syncconf` accepts the file
+_wg_syncconf() {
+  local conf="$1"
+  local stripped
+  stripped=$(grep -v -E '^\s*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)\s*=' \
+    "${conf}")
+  wg syncconf "${WG_IFACE}" <(echo "${stripped}")
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core setup orchestration
+# ─────────────────────────────────────────────────────────────────────────────
+
+do_setup() {
+  local force_keys="${1:-false}"
+  local force_token="${2:-false}"
+
+  log "=== PIA WireGuard Setup (v${VERSION}) ==="
+  [[ -n "${DIP_TOKEN}" ]] && info "Mode: Dedicated IP" || info "Mode: Standard (region: ${PIA_REGION})"
+
+  init_data_dir
+
+  local pubkey
+  pubkey=$(ensure_wg_keys "${force_keys}")
+
+  local auth_token
+  auth_token=$(get_pia_token "${force_token}")
+
+  local server_cn server_ip is_dip=false
+  if [[ -n "${DIP_TOKEN}" ]]; then
+    is_dip=true
+    local pair; pair=$(get_dip_server "${auth_token}")
+    server_cn="${pair%|*}"
+    server_ip="${pair#*|}"
+  else
+    local pair; pair=$(select_server "${PIA_REGION}")
+    server_cn="${pair%|*}"
+    server_ip="${pair#*|}"
+  fi
+
+  local server_resp
+  server_resp=$(register_key "${auth_token}" "${server_cn}" "${server_ip}" "${pubkey}" "${is_dip}")
+
+  # Always build Firewalla profiles (they go to DATA_DIR at minimum)
+  local fw_name
+  fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}")
+  deploy_to_firewalla "${fw_name}"
+
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
+    # Standalone mode: also write the wg-quick conf and bring up the interface
+    write_wg_conf "${server_resp}" "${server_ip}"
+    wg_up
+  else
+    # Firewalla mode: sync config if the interface is already active
+    if is_iface_up; then
+      local fw_conf="${DATA_DIR}/${PROFILE_NAME}.conf"
+      info "Interface ${WG_IFACE} is active — syncing new config"
+      _wg_syncconf "${fw_conf}"
+    fi
+  fi
+
+  log "=== Setup complete ==="
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchdog
+# ─────────────────────────────────────────────────────────────────────────────
+
+get_handshake_age() {
+  local ts
+  ts=$(wg show "${WG_IFACE}" latest-handshakes 2>/dev/null \
+    | awk 'NF>=2{print $2; exit}')
+  [[ -z "${ts}" || "${ts}" == "0" ]] && echo 999999 && return
+  echo $(( $(date +%s) - ts ))
+}
+
+check_connectivity() {
+  ping -c 2 -W 3 -I "${WG_IFACE}" "${VPN_CHECK_IP}" &>/dev/null
+}
+
+do_reconnect() {
+  local attempt="${1:-1}"
+  local backoff=$(( 2 ** (attempt - 1) ))
+  (( backoff > 120 )) && backoff=120
+
+  warn "Reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} (backoff ${backoff}s)..."
+  (( attempt > 1 )) && sleep "${backoff}"
+
+  # Bring down cleanly before re-setup (standalone only)
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
+    wg_down 2>/dev/null || true
+    sleep 2
+  fi
+
+  # Force a fresh token on every reconnect attempt
+  do_setup "false" "true"
+}
+
+run_watchdog() {
+  local down_time=0
+  local reconnect_attempts=0
+
+  log "Watchdog active — interval ${WATCHDOG_INTERVAL}s | handshake_max ${HANDSHAKE_MAX_AGE}s | reconnect_after ${MAX_DOWN_TIME}s"
+
+  while true; do
+    sleep "${WATCHDOG_INTERVAL}"
+
+    if ! is_iface_up; then
+      warn "Interface ${WG_IFACE} is not up"
+      (( down_time += WATCHDOG_INTERVAL ))
+    else
+      local hs_age
+      hs_age=$(get_handshake_age)
+
+      if (( hs_age > HANDSHAKE_MAX_AGE )); then
+        warn "Stale handshake: ${hs_age}s (max ${HANDSHAKE_MAX_AGE}s)"
+        (( down_time += WATCHDOG_INTERVAL ))
+      elif ! check_connectivity; then
+        warn "No ping response from ${VPN_CHECK_IP} through ${WG_IFACE}"
+        (( down_time += WATCHDOG_INTERVAL ))
+      else
+        (( down_time > 0 )) && info "VPN connectivity restored after ${down_time}s"
+        down_time=0
+        reconnect_attempts=0
+        log "VPN healthy — handshake ${hs_age}s ago"
+        continue
+      fi
+    fi
+
+    log "Cumulative down time: ${down_time}s / ${MAX_DOWN_TIME}s"
+
+    if (( down_time >= MAX_DOWN_TIME )); then
+      (( reconnect_attempts++ ))
+
+      if (( reconnect_attempts > MAX_RECONNECT_ATTEMPTS )); then
+        err "Exhausted ${MAX_RECONNECT_ATTEMPTS} reconnect attempts — cooling off 5 min"
+        sleep 300
+        reconnect_attempts=0
+        down_time=0
+        continue
+      fi
+
+      do_reconnect "${reconnect_attempts}"
+      down_time=0
+    fi
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Status display
+# ─────────────────────────────────────────────────────────────────────────────
+
+show_status() {
+  echo -e "\n${BOLD}PIA WireGuard Status${NC}"
+  echo    "──────────────────────────────────────────────"
+
+  if is_iface_up; then
+    local hs_age; hs_age=$(get_handshake_age)
+    local hs_color; (( hs_age < HANDSHAKE_MAX_AGE )) && hs_color="${GREEN}" || hs_color="${YELLOW}"
+    echo -e "Interface:    ${GREEN}UP${NC} (${WG_IFACE})"
+    echo -e "Handshake:    ${hs_color}${hs_age}s ago${NC}"
+    if check_connectivity; then
+      echo -e "Connectivity: ${GREEN}OK${NC} (${VPN_CHECK_IP} reachable)"
+    else
+      echo -e "Connectivity: ${RED}FAIL${NC} (${VPN_CHECK_IP} unreachable)"
+    fi
+    wg show "${WG_IFACE}" 2>/dev/null | grep -E '(endpoint|transfer)' | sed 's/^/  /' || true
+  else
+    echo -e "Interface:    ${RED}DOWN${NC} (${WG_IFACE})"
+  fi
+
+  local token_file="${DATA_DIR}/token"
+  if [[ -f "${token_file}" ]]; then
+    local age; age=$(file_age "${token_file}")
+    local ttl_remain=$(( TOKEN_TTL - age ))
+    if (( ttl_remain > 0 )); then
+      echo -e "Token:        ${GREEN}Valid${NC} (expires in ~$(( ttl_remain / 3600 ))h $(( (ttl_remain % 3600) / 60 ))m)"
+    else
+      echo -e "Token:        ${RED}Expired${NC}"
+    fi
+  else
+    echo -e "Token:        ${YELLOW}Not cached${NC}"
+  fi
+
+  local conn="${DATA_DIR}/connection.json"
+  if [[ -f "${conn}" ]]; then
+    echo "Server IP:    $(jq -r '.server_ip'  "${conn}")"
+    echo "Peer IP:      $(jq -r '.peer_ip'    "${conn}")"
+    local ts; ts=$(jq -r '.established_at' "${conn}")
+    echo "Established:  $(date -d "@${ts}" 2>/dev/null || echo "${ts}")"
+  fi
+
+  echo "Profile:      ${PROFILE_NAME}"
+  if [[ -n "${DIP_TOKEN}" ]]; then
+    echo -e "Account type: ${CYAN}Dedicated IP${NC}"
+  else
+    echo    "Region:       ${PIA_REGION}"
+  fi
+  echo "──────────────────────────────────────────────"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+
+${BOLD}pia-wg-firewalla.sh${NC} v${VERSION}
+PIA WireGuard VPN for Firewalla — dedicated IP support, automatic token refresh
+
+${BOLD}USAGE${NC}
+  $0 <command> [options]
+
+${BOLD}COMMANDS${NC}
+  start          Setup + launch watchdog (use for Docker / systemd)
+  setup          One-time setup (generate config, deploy to Firewalla)
+  reconnect      Force fresh token + reconnect
+  watchdog       Run watchdog loop (assumes VPN already active)
+  status         Show VPN health, token TTL, and connection info
+  list-regions   List all available PIA WireGuard regions
+
+${BOLD}OPTIONS${NC}
+  --new-keys     Regenerate WireGuard private/public keypair
+  --new-token    Force PIA token refresh
+  --region R     Override PIA_REGION for this run
+  --profile N    Override PROFILE_NAME for this run
+
+${BOLD}KEY ENVIRONMENT VARIABLES${NC}  (set in .env or export before running)
+  PIA_USER                  PIA username (required)
+  PIA_PASS                  PIA password (required)
+  DIP_TOKEN                 Dedicated IP token (omit for standard account)
+  PIA_REGION                Server region, default: us_east
+  PROFILE_NAME              VPN profile / interface name, default: PIA_WG
+  WG_MANAGED_BY_FIREWALLA   true = Firewalla owns wg interface, default: false
+  DATA_DIR                  State directory, default: /data/pia-wg
+  WG_DNS_OVERRIDE           Comma-separated DNS servers (overrides PIA DNS)
+  WATCHDOG_INTERVAL         Seconds between checks, default: 60
+  MAX_DOWN_TIME             Seconds before reconnect, default: 300
+  VPN_CHECK_IP              Ping target for connectivity check, default: 9.9.9.9
+
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  # Parse flags
+  local force_keys=false force_token=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --new-keys)   force_keys=true ;;
+      --new-token)  force_token=true ;;
+      --region)     PIA_REGION="$2";   shift ;;
+      --profile)    PROFILE_NAME="$2"; WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"; shift ;;
+      --help|-h)    usage; exit 0 ;;
+      *) warn "Unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  case "${cmd}" in
+    start)
+      load_env; check_deps
+      do_setup "${force_keys}" "${force_token}"
+      run_watchdog
+      ;;
+    setup)
+      load_env; check_deps
+      do_setup "${force_keys}" "${force_token}"
+      ;;
+    reconnect)
+      load_env; check_deps
+      do_setup "false" "true"
+      ;;
+    watchdog)
+      load_env; check_deps
+      run_watchdog
+      ;;
+    status)
+      load_env
+      show_status
+      ;;
+    list-regions)
+      load_env; check_deps
+      list_regions
+      ;;
+    help|--help|-h)
+      usage
+      ;;
+    *)
+      err "Unknown command: ${cmd}"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

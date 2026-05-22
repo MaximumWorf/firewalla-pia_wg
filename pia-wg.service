@@ -1,0 +1,52 @@
+# =============================================================================
+# pia-wg.service — systemd unit for native Firewalla deployment
+#
+# Install:
+#   sudo cp pia-wg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pia-wg
+#
+# Logs:
+#   journalctl -u pia-wg -f
+# =============================================================================
+[Unit]
+Description=PIA WireGuard VPN (with dedicated IP support and watchdog)
+Documentation=https://github.com/maximumworf/firewalla-pia_wg
+After=network-online.target
+Wants=network-online.target
+# Restart after any network changes so we reconnect with a fresh server
+After=NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/pia-wg
+
+# Load credentials from /home/pi/pia-wg/.env
+EnvironmentFile=-/home/pi/pia-wg/.env
+
+# In native Firewalla mode, let Firewalla manage the WireGuard interface.
+# The service generates profile files, deploys them, then watches the tunnel.
+Environment=WG_MANAGED_BY_FIREWALLA=true
+Environment=DATA_DIR=/data/pia-wg
+
+ExecStart=/home/pi/pia-wg/pia-wg-firewalla.sh start
+ExecStop=/bin/true
+
+# Always restart unless explicitly stopped
+Restart=on-failure
+RestartSec=15
+# Limit restart storm to 5 attempts per 2 minutes
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Give the network time to settle after reboot
+TimeoutStartSec=90
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pia-wg
+
+[Install]
+WantedBy=multi-user.target

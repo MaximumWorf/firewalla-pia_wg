@@ -1,0 +1,72 @@
+---
+# =============================================================================
+# PIA WireGuard for Firewalla — Docker Compose
+#
+# Quick start:
+#   cp .env.example .env
+#   # Edit .env — set PIA_USER, PIA_PASS, and optionally DIP_TOKEN
+#   docker compose up -d
+#
+# View logs:
+#   docker compose logs -f
+#
+# Force reconnect:
+#   docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
+#
+# Show status:
+#   docker compose exec pia-wg /app/pia-wg-firewalla.sh status
+# =============================================================================
+version: "3.9"
+
+services:
+  pia-wg:
+    build: .
+    # Use a pre-built image instead of building locally (optional):
+    # image: ghcr.io/maximumworf/firewalla-pia_wg:latest
+    container_name: pia-wg
+    restart: unless-stopped
+
+    # Host networking gives the WireGuard interface visibility to the host.
+    # Required so Firewalla can route traffic through the tunnel if desired.
+    network_mode: host
+
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE     # needed to load wireguard kernel module
+
+    # Allow /dev/net/tun access for WireGuard userspace implementations
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    volumes:
+      # Persistent state: token cache, keys, server list, configs
+      - pia-wg-data:/data/pia-wg
+
+      # Optional: mount Firewalla's WireGuard profile directory so the
+      # container can deploy profiles that Firewalla will pick up.
+      # Uncomment if you also want WG_MANAGED_BY_FIREWALLA=true.
+      # - /home/pi/.firewalla/run/wg_profile:/home/pi/.firewalla/run/wg_profile
+      # - /media/home-rw/overlay/pi/.firewalla/run/wg_profile:/media/home-rw/overlay/pi/.firewalla/run/wg_profile
+
+    env_file:
+      - .env
+
+    # Override individual variables here (takes precedence over .env)
+    environment:
+      # In Docker, the script manages WireGuard directly (wg-quick)
+      WG_MANAGED_BY_FIREWALLA: "false"
+
+    # Healthcheck: verify the WireGuard interface exists
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ip link show $${PROFILE_NAME:-PIA_WG} | grep -q UP"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1   # required by wg-quick
+      - net.ipv6.conf.all.disable_ipv6=0
+
+volumes:
+  pia-wg-data:
