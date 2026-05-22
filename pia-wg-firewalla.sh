@@ -197,21 +197,13 @@ get_pia_token() {
 
   log "Authenticating with PIA (v2 API)..."
   local resp token
-  # Use JSON body — matches the reference pia-wg.sh implementation
   resp=$(curl_retry -s --max-time 20 \
+    --location \
     --request POST \
-    --header "Content-Type: application/json" \
-    --data "{\"username\":\"${PIA_USER}\",\"password\":\"${PIA_PASS}\"}" \
+    --form "username=${PIA_USER}" \
+    --form "password=${PIA_PASS}" \
     "${PIA_TOKEN_URL}") || true
   token=$(echo "${resp}" | jq -r '.token // empty' 2>/dev/null || true)
-
-  if [[ -z "${token}" ]]; then
-    log "v2 auth failed, trying v3 API..."
-    resp=$(curl_retry -s --max-time 20 \
-      --user "${PIA_USER}:${PIA_PASS}" \
-      "https://privateinternetaccess.com/gtoken/generateToken") || true
-    token=$(echo "${resp}" | jq -r '.token // empty' 2>/dev/null || true)
-  fi
 
   [[ -z "${token}" ]] && die "PIA authentication failed. Last response: ${resp}"
 
@@ -236,15 +228,16 @@ get_dip_server() {
   fi
 
   log "Resolving Dedicated IP server via PIA API..."
-  local json_body resp http_code
-  json_body=$(jq -n --arg t "${DIP_TOKEN}" '{"tokens":[$t]}')
+  local resp http_code
 
   # Capture HTTP status code alongside the body for better error messages
+  # Use --data-raw with shell interpolation to match the working reference script exactly
   resp=$(curl_retry -s --max-time 20 --location \
+    --request POST \
     --write-out "\n%{http_code}" \
-    --header "Authorization: Token ${auth_token}" \
     --header "Content-Type: application/json" \
-    --data "${json_body}" \
+    --header "Authorization: Token ${auth_token}" \
+    --data-raw '{"tokens":["'"${DIP_TOKEN}"'"]}' \
     "${PIA_DIP_API_URL}") || {
       die "curl could not reach ${PIA_DIP_API_URL}. Check connectivity, or set DIP_HOSTNAME and DIP_SERVER_IP manually."
     }
@@ -402,13 +395,14 @@ register_key() {
   fi
 
   local resp
-  # Use --resolve (reference: pia-wg.sh) instead of --connect-to for broader curl compat
+  # Use --connect-to (matches working reference scripts) — routes TLS to server_ip
+  # while preserving the correct SNI hostname for certificate verification.
   resp=$(curl_retry -sS --max-time 15 -G \
-    --resolve "${server_cn}:${server_port}:${server_ip}" \
+    --connect-to "${server_cn}::${server_ip}:" \
     --cacert "${DATA_DIR}/ca.rsa.4096.crt" \
     "${auth_args[@]}" \
     --data-urlencode "pubkey=${pubkey}" \
-    "https://${server_cn}:${server_port}/addKey") \
+    "https://${server_cn}:1337/addKey") \
     || die "curl failed during WireGuard key registration with ${server_cn}"
 
   local status
