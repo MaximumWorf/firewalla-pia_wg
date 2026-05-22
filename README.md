@@ -35,16 +35,21 @@ curl -fsSL https://raw.githubusercontent.com/maximumworf/firewalla-pia_wg/main/i
 # → VPN Client → WireGuard → PIA_WG → Enable
 ```
 
-### Option B — Docker (any Linux host)
+### Option B — Docker (any Linux host, no repo clone needed)
+
+A multi-arch image (`amd64` / `arm64` / `armv7`) is published automatically to GitHub Container Registry on every push to `main`. You only need two files:
 
 ```bash
-git clone https://github.com/maximumworf/firewalla-pia_wg
-cd firewalla-pia_wg
+mkdir pia-wg && cd pia-wg
 
-cp .env.example .env
-# Edit .env — set PIA_USER and PIA_PASS at minimum
+# Grab the compose file and config template — that's all you need
+curl -fsSL https://raw.githubusercontent.com/MaximumWorf/firewalla-pia_wg/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/MaximumWorf/firewalla-pia_wg/main/.env.example -o .env
+
+# Set your credentials (at minimum PIA_USER and PIA_PASS)
 nano .env
 
+# Pull image and start — no build step required
 docker compose up -d
 docker compose logs -f
 ```
@@ -175,17 +180,29 @@ PIA tokens are valid for ~24 hours. The watchdog detects that the tunnel is down
 
 ## Docker details
 
-The container runs with `network_mode: host` and `cap_add: [NET_ADMIN, SYS_MODULE]` so it can manage a real WireGuard interface on the host. The `/data/pia-wg` volume persists keys and token cache across container restarts.
+The container runs with `network_mode: host` and `cap_add: [NET_ADMIN, SYS_MODULE]` so it can create a real WireGuard interface on the host. The `pia-wg-data` named volume persists keys, the PIA token, and the server list — so container restarts don't trigger a full re-registration.
 
-To also have Firewalla pick up the profile, uncomment the volume mounts in `docker-compose.yml` and set `WG_MANAGED_BY_FIREWALLA=true`.
+### Image
+
+Pre-built multi-arch image published on every push to `main`:
+```
+ghcr.io/maximumworf/firewalla-pia_wg:latest
+```
+Architectures: `linux/amd64`, `linux/arm64`, `linux/arm/v7` (covers Firewalla Gold/Purple/SE).
+
+### Useful commands
 
 ```bash
-# Useful Docker commands
 docker compose exec pia-wg /app/pia-wg-firewalla.sh status
 docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
 docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions
 docker compose logs -f --tail 100
+docker compose pull && docker compose up -d   # update to latest image
 ```
+
+### Optional: also write Firewalla profiles from Docker
+
+Uncomment the two volume mounts in `docker-compose.yml` and add `WG_MANAGED_BY_FIREWALLA=true` to `.env`. The container will deploy profile files into Firewalla's profile directory, and Firewalla's own WireGuard subsystem will own the interface. The watchdog will use `wg syncconf` to update the peer on reconnect.
 
 ---
 
