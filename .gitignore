@@ -1,0 +1,8 @@
+# Local credential files — never commit these
+.env
+docker-compose.override.yml
+
+# Runtime state
+/data/
+*.key
+*.token

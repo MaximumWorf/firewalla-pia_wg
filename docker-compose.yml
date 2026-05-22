@@ -2,60 +2,93 @@
 # =============================================================================
 # PIA WireGuard for Firewalla — Docker Compose
 #
-# No-clone quick start (pulls pre-built image automatically):
+# Quick start (no repo clone needed):
 #
-#   mkdir pia-wg && cd pia-wg
 #   curl -fsSL https://raw.githubusercontent.com/MaximumWorf/firewalla-pia_wg/main/docker-compose.yml -o docker-compose.yml
-#   curl -fsSL https://raw.githubusercontent.com/MaximumWorf/firewalla-pia_wg/main/.env.example -o .env
-#   # Edit .env — set PIA_USER and PIA_PASS (and optionally DIP_TOKEN)
-#   nano .env
+#   # Edit this file — fill in PIA_USER and PIA_PASS below
 #   docker compose up -d
+#
+# ⚠  This file will contain your PIA password — do not commit it to git or
+#    share it publicly. Add docker-compose.yml to your .gitignore if needed.
 #
 # View logs:       docker compose logs -f
 # Force reconnect: docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
 # Show status:     docker compose exec pia-wg /app/pia-wg-firewalla.sh status
 # List regions:    docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions
+# Update image:    docker compose pull && docker compose up -d
 # =============================================================================
 version: "3.9"
 
 services:
   pia-wg:
-    # Pre-built multi-arch image (amd64 / arm64 / armv7) — no repo clone needed.
-    # To build locally instead, comment this line and uncomment `build: .` below.
+    # Pre-built multi-arch image (amd64 / arm64 / armv7) — pulled automatically.
+    # To build from source instead, comment the image line and uncomment build.
     image: ghcr.io/maximumworf/firewalla-pia_wg:latest
     # build: .
     container_name: pia-wg
     restart: unless-stopped
 
-    # Host networking exposes the WireGuard interface to the host OS.
-    # Required so the tunnel is visible to Firewalla's routing engine.
-    network_mode: host
+    network_mode: host   # exposes the WireGuard interface to the host OS
 
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE     # load wireguard kernel module
+      - SYS_MODULE       # load wireguard kernel module
 
     devices:
       - /dev/net/tun:/dev/net/tun
 
     volumes:
-      # Persistent state: WireGuard keypair, PIA token cache, server list, configs.
-      # Keys and token survive container restarts — no re-registration on every start.
+      # Persistent state: WireGuard keypair, PIA token, server list cache.
+      # Keys survive container restarts — no re-registration on every start.
       - pia-wg-data:/data/pia-wg
 
-      # Optional: also write Firewalla profile files so the VPN appears in the
-      # Firewalla app under VPN Client → WireGuard. Uncomment both lines below
-      # and set WG_MANAGED_BY_FIREWALLA=true in your .env.
+      # Optional: write Firewalla profile files so the VPN appears in the
+      # Firewalla app under VPN Client → WireGuard. Also set
+      # WG_MANAGED_BY_FIREWALLA to "true" below if you uncomment these.
       # - /home/pi/.firewalla/run/wg_profile:/home/pi/.firewalla/run/wg_profile
       # - /media/home-rw/overlay/pi/.firewalla/run/wg_profile:/media/home-rw/overlay/pi/.firewalla/run/wg_profile
 
-    env_file:
-      - .env
-
     environment:
-      # Docker manages the WireGuard interface directly via wg-quick.
-      # Change to "true" only if you also uncomment the Firewalla volume mounts above.
+      # ── Required ────────────────────────────────────────────────────────────
+      PIA_USER: ""          # your PIA username, e.g. p1234567
+      PIA_PASS: ""          # your PIA password
+
+      # ── Dedicated IP ────────────────────────────────────────────────────────
+      # Leave blank to use a standard shared IP in the region below.
+      # Paste the token from your PIA account dashboard to use a Dedicated IP.
+      # When set, PIA_REGION is ignored — the server is fixed by PIA.
+      DIP_TOKEN: ""
+
+      # ── Region (ignored when DIP_TOKEN is set) ───────────────────────────
+      # Run `docker compose exec pia-wg /app/pia-wg-firewalla.sh list-regions`
+      # for a full list of available region IDs.
+      PIA_REGION: "us_east"
+
+      # ── Profile / interface name ─────────────────────────────────────────
+      # This becomes the WireGuard interface name on the host.
+      # Use only letters, numbers, _ and -  (max 15 characters).
+      PROFILE_NAME: "PIA_WG"
+
+      # ── WireGuard management mode ────────────────────────────────────────
+      # "false" = container manages WireGuard directly via wg-quick (default).
+      # "true"  = Firewalla manages the interface; requires the volume mounts
+      #           above to be uncommented so profile files reach Firewalla.
       WG_MANAGED_BY_FIREWALLA: "false"
+
+      # ── DNS ──────────────────────────────────────────────────────────────
+      # Leave blank to use PIA's DNS servers (recommended — prevents leaks).
+      # Override with comma-separated IPs, e.g. "1.1.1.1,1.0.0.1"
+      WG_DNS_OVERRIDE: ""
+
+      # ── Watchdog tuning ──────────────────────────────────────────────────
+      WATCHDOG_INTERVAL: "60"      # seconds between health checks
+      HANDSHAKE_MAX_AGE: "120"     # stale handshake threshold (seconds)
+      MAX_DOWN_TIME: "300"         # downtime before reconnect (seconds)
+      MAX_RECONNECT_ATTEMPTS: "5"  # attempts before 5-minute back-off
+      VPN_CHECK_IP: "9.9.9.9"     # ping target for connectivity check
+
+      # ── Internal ─────────────────────────────────────────────────────────
+      DATA_DIR: "/data/pia-wg"
 
     healthcheck:
       test: ["CMD", "sh", "-c", "ip link show $${PROFILE_NAME:-PIA_WG} | grep -q UP"]
