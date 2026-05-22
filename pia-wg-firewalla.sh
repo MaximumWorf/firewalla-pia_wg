@@ -139,6 +139,9 @@ init_data_dir() {
   mkdir -p "${DATA_DIR}"
   chmod 700 "${DATA_DIR}"
   printf '%s' "${PIA_CA_CERT}" > "${DATA_DIR}/ca.rsa.4096.crt"
+  # Required by wg-quick for fwmark-based routing rules.
+  # Silently ignored if the kernel doesn't permit it (already set by host).
+  sysctl -qw net.ipv4.conf.all.src_valid_mark=1 2>/dev/null || true
 }
 
 # Returns seconds since file was last modified, or 999999 if it doesn't exist.
