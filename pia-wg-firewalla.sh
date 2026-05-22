@@ -151,6 +151,20 @@ file_age() {
   echo $(( $(date +%s) - $(stat -c %Y "$f") ))
 }
 
+# Retry curl up to 3 times with increasing delays.
+# Usage: curl_retry [curl args...]  — stdout is the response body
+curl_retry() {
+  local attempt=1 max=3 out
+  while (( attempt <= max )); do
+    out=$(curl "$@" 2>/dev/null) && { echo "${out}"; return 0; }
+    warn "curl attempt ${attempt}/${max} failed — retrying in ${attempt}s..."
+    sleep "${attempt}"
+    (( attempt++ )) || true
+  done
+  warn "curl failed after ${max} attempts"
+  return 1
+}
+
 is_iface_up() {
   ip link show "${WG_IFACE}" &>/dev/null
 }
@@ -178,11 +192,11 @@ get_pia_token() {
 
   log "Authenticating with PIA..."
   local resp
-  resp=$(curl -s --max-time 20 --location \
+  resp=$(curl_retry -s --max-time 20 --location \
     --request POST "${PIA_TOKEN_URL}" \
     --form "username=${PIA_USER}" \
     --form "password=${PIA_PASS}") \
-    || die "Network error contacting PIA token API"
+    || die "Cannot reach PIA auth API after retries — check network connectivity"
 
   local token
   token=$(echo "${resp}" | jq -r '.token // empty')
@@ -202,18 +216,25 @@ get_dip_server() {
   local auth_token="$1"
 
   log "Resolving Dedicated IP server info..."
+
+  # Build JSON body safely so special characters in the token don't break it
+  local json_body
+  json_body=$(jq -n --arg t "${DIP_TOKEN}" '{"tokens":[$t]}')
+
   local resp
-  resp=$(curl -s --max-time 20 \
+  resp=$(curl_retry -s --max-time 20 \
     --header "Authorization: Token ${auth_token}" \
     --header "Content-Type: application/json" \
-    --data "{\"tokens\":[\"${DIP_TOKEN}\"]}" \
+    --data "${json_body}" \
     "${PIA_DIP_API_URL}") \
-    || die "Network error contacting PIA dedicated IP API"
+    || die "Cannot reach PIA dedicated IP API after retries — check network connectivity"
 
   local status
   status=$(echo "${resp}" | jq -r '.[0].status // empty')
-  [[ "${status}" != "active" ]] && \
-    die "Dedicated IP not active (status=${status}). Response: ${resp}"
+  if [[ "${status}" != "active" ]]; then
+    err "PIA DIP API response: ${resp}"
+    die "Dedicated IP not active (status='${status}'). Verify DIP_TOKEN is correct and the IP is active in your PIA account."
+  fi
 
   echo "${resp}" | jq '.[0]' > "${DATA_DIR}/dip_server.json"
 
@@ -817,6 +838,9 @@ main() {
   case "${cmd}" in
     start)
       load_env; check_deps
+      # Give the host network a moment to be ready before the first API call
+      log "Waiting 5s for network to initialise..."
+      sleep 5
       do_setup "${force_keys}" "${force_token}"
       run_watchdog
       ;;
