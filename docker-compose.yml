@@ -21,12 +21,12 @@ version: "3.9"
 
 services:
   pia-wg:
-    # Pre-built multi-arch image (amd64 / arm64 / armv7).
-    # Requires the ghcr.io package visibility to be set to Public on GitHub.
-    # To build locally instead, comment the image line and uncomment build.
-    image: ghcr.io/maximumworf/firewalla-pia_wg:latest
-    # build:
-    #   context: https://github.com/MaximumWorf/firewalla-pia_wg.git
+    # Builds directly from GitHub — no registry login needed.
+    # `docker compose build --no-cache` always fetches the latest source.
+    # To use a pre-built registry image instead, swap these two blocks.
+    build:
+      context: https://github.com/MaximumWorf/firewalla-pia_wg.git
+    image: pia-wg:latest
     container_name: pia-wg
     restart: unless-stopped
 
