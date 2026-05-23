@@ -92,6 +92,9 @@ DIP_PORT="${DIP_PORT:-1337}"
 
 # ── Derive interface name (max 15 chars, Linux IFNAMSIZ limit) ─────────────────
 WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
+# Firewalla prefixes its managed WireGuard interfaces with "vpn_".
+# WG_IFACE_ACTUAL is the real kernel interface name; WG_IFACE is the profile name.
+WG_IFACE_ACTUAL="${WG_IFACE}"
 
 # ── Terminal colours (disabled when not a tty) ─────────────────────────────────
 if [[ -t 1 ]]; then
@@ -136,8 +139,13 @@ load_env() {
   # Load .env from script dir, then from DATA_DIR (Docker volume wins)
   [[ -f "${SCRIPT_DIR}/.env" ]]  && { info "Loading ${SCRIPT_DIR}/.env"; source "${SCRIPT_DIR}/.env"; }
   [[ -f "${DATA_DIR}/.env" ]]    && { info "Loading ${DATA_DIR}/.env";    source "${DATA_DIR}/.env";    }
-  # Re-derive interface name after env load in case PROFILE_NAME changed
+  # Re-derive interface names after env load in case PROFILE_NAME or mode changed
   WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
+    WG_IFACE_ACTUAL="vpn_${WG_IFACE}"
+  else
+    WG_IFACE_ACTUAL="${WG_IFACE}"
+  fi
 }
 
 init_data_dir() {
@@ -171,7 +179,7 @@ curl_retry() {
 }
 
 is_iface_up() {
-  ip link show "${WG_IFACE}" &>/dev/null
+  ip link show "${WG_IFACE_ACTUAL}" &>/dev/null
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,6 +450,8 @@ write_wg_conf() {
   local privkey peer_ip server_key server_port dns
   privkey=$(cat "${DATA_DIR}/private.key")
   peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  # PIA sometimes omits the prefix length — wg-quick requires CIDR notation
+  [[ "${peer_ip}" != */* ]] && peer_ip="${peer_ip}/32"
   server_key=$(echo "${server_resp}" | jq -r '.server_key')
   server_port=$(echo "${server_resp}"| jq -r '.server_port')
   dns=$(_resolve_dns "${server_resp}")
@@ -491,6 +501,8 @@ build_firewalla_profiles() {
   local privkey peer_ip server_key server_port dns dns_json
   privkey=$(cat "${DATA_DIR}/private.key")
   peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  # PIA sometimes omits the prefix length — wg-quick requires CIDR notation
+  [[ "${peer_ip}" != */* ]] && peer_ip="${peer_ip}/32"
   server_key=$(echo "${server_resp}" | jq -r '.server_key')
   server_port=$(echo "${server_resp}"| jq -r '.server_port')
   dns=$(_resolve_dns "${server_resp}")
@@ -611,7 +623,7 @@ _wg_syncconf() {
   local stripped
   stripped=$(grep -v -E '^\s*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)\s*=' \
     "${conf}")
-  wg syncconf "${WG_IFACE}" <(echo "${stripped}")
+  wg syncconf "${WG_IFACE_ACTUAL}" <(echo "${stripped}")
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -662,7 +674,7 @@ do_setup() {
     # Firewalla mode: sync config if the interface is already active
     if is_iface_up; then
       local fw_conf="${DATA_DIR}/${PROFILE_NAME}.conf"
-      info "Interface ${WG_IFACE} is active — syncing new config"
+      info "Interface ${WG_IFACE_ACTUAL} is active — syncing new config"
       _wg_syncconf "${fw_conf}"
     fi
   fi
@@ -676,14 +688,14 @@ do_setup() {
 
 get_handshake_age() {
   local ts
-  ts=$(wg show "${WG_IFACE}" latest-handshakes 2>/dev/null \
+  ts=$(wg show "${WG_IFACE_ACTUAL}" latest-handshakes 2>/dev/null \
     | awk 'NF>=2{print $2; exit}')
   [[ -z "${ts}" || "${ts}" == "0" ]] && echo 999999 && return
   echo $(( $(date +%s) - ts ))
 }
 
 check_connectivity() {
-  ping -c 2 -W 3 -I "${WG_IFACE}" "${VPN_CHECK_IP}" &>/dev/null
+  ping -c 2 -W 3 -I "${WG_IFACE_ACTUAL}" "${VPN_CHECK_IP}" &>/dev/null
 }
 
 do_reconnect() {
@@ -708,14 +720,20 @@ run_watchdog() {
   local down_time=0
   local reconnect_attempts=0
 
-  log "Watchdog active — interval ${WATCHDOG_INTERVAL}s | handshake_max ${HANDSHAKE_MAX_AGE}s | reconnect_after ${MAX_DOWN_TIME}s"
+  log "Watchdog active — interface ${WG_IFACE_ACTUAL} | interval ${WATCHDOG_INTERVAL}s | handshake_max ${HANDSHAKE_MAX_AGE}s | reconnect_after ${MAX_DOWN_TIME}s"
 
   while true; do
     sleep "${WATCHDOG_INTERVAL}"
 
     if ! is_iface_up; then
-      warn "Interface ${WG_IFACE} is not up"
-      (( down_time += WATCHDOG_INTERVAL ))
+      if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
+        # Interface down is normal in Firewalla mode — the app controls it.
+        # Don't count as downtime or we'll re-register keys and kill an active session.
+        log "Interface ${WG_IFACE_ACTUAL} not up — waiting for Firewalla app"
+      else
+        warn "Interface ${WG_IFACE_ACTUAL} is not up"
+        (( down_time += WATCHDOG_INTERVAL ))
+      fi
     else
       local hs_age
       hs_age=$(get_handshake_age)
@@ -724,7 +742,7 @@ run_watchdog() {
         warn "Stale handshake: ${hs_age}s (max ${HANDSHAKE_MAX_AGE}s)"
         (( down_time += WATCHDOG_INTERVAL ))
       elif ! check_connectivity; then
-        warn "No ping response from ${VPN_CHECK_IP} through ${WG_IFACE}"
+        warn "No ping response from ${VPN_CHECK_IP} through ${WG_IFACE_ACTUAL}"
         (( down_time += WATCHDOG_INTERVAL ))
       else
         (( down_time > 0 )) && info "VPN connectivity restored after ${down_time}s"
