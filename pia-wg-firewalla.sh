@@ -559,6 +559,7 @@ deploy_to_firewalla() {
       cp -f "${DATA_DIR}/${name}.conf"     "${fw_dir}/${name}.conf"
       cp -f "${DATA_DIR}/${name}.json"     "${fw_dir}/${name}.json"
       cp -f "${DATA_DIR}/${name}.settings" "${fw_dir}/${name}.settings"
+      chown pi:pi "${fw_dir}/${name}.conf" "${fw_dir}/${name}.json" "${fw_dir}/${name}.settings" 2>/dev/null || true
       info "Deployed to ${fw_dir}"
       (( deployed++ )) || true
     fi
