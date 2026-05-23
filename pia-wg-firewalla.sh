@@ -470,7 +470,7 @@ DNS = ${dns}
 
 [Peer]
 PublicKey = ${server_key}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 Endpoint = ${server_ip}:${server_port}
 PersistentKeepalive = 25
 EOF
@@ -519,7 +519,7 @@ DNS = ${dns}
 
 [Peer]
 PublicKey = ${server_key}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 Endpoint = ${server_ip}:${server_port}
 PersistentKeepalive = 25
 EOF
@@ -533,7 +533,7 @@ EOF
       "publicKey": "${server_key}",
       "endpoint": "${server_ip}:${server_port}",
       "persistentKeepalive": 25,
-      "allowedIPs": ["0.0.0.0/0", "::/0"]
+      "allowedIPs": ["0.0.0.0/0"]
     }
   ],
   "addresses": ["${peer_ip}"],
