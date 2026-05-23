@@ -556,9 +556,9 @@ deploy_to_firewalla() {
     # Only deploy if the parent directory exists (i.e. we're on Firewalla)
     if [[ -d "$(dirname "${fw_dir}")" ]]; then
       mkdir -p "${fw_dir}"
-      cp -f "${DATA_DIR}/${name}.conf"     "${fw_dir}/${name}.conf"
-      cp -f "${DATA_DIR}/${name}.json"     "${fw_dir}/${name}.json"
-      cp -f "${DATA_DIR}/${name}.settings" "${fw_dir}/${name}.settings"
+      cat "${DATA_DIR}/${name}.conf"     > "${fw_dir}/${name}.conf"
+      cat "${DATA_DIR}/${name}.json"     > "${fw_dir}/${name}.json"
+      cat "${DATA_DIR}/${name}.settings" > "${fw_dir}/${name}.settings"
       chown pi:pi "${fw_dir}/${name}.conf" "${fw_dir}/${name}.json" "${fw_dir}/${name}.settings" 2>/dev/null || true
       info "Deployed to ${fw_dir}"
       (( deployed++ )) || true
