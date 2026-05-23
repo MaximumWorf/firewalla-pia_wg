@@ -101,9 +101,9 @@ else
   RED=''; YELLOW=''; GREEN=''; BLUE=''; CYAN=''; BOLD=''; NC=''
 fi
 
-log()  { echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $*"; }
-info() { echo -e "${GREEN}[INFO ]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN ]${NC} $*"; }
+log()  { echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $*" >&2; }
+info() { echo -e "${GREEN}[INFO ]${NC} $*" >&2; }
+warn() { echo -e "${YELLOW}[WARN ]${NC} $*" >&2; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
