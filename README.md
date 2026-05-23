@@ -236,7 +236,9 @@ sudo ./pia-wg-firewalla.sh start   # setup + watchdog (runs in foreground)
 |---|---|---|
 | `PIA_USER` | — | PIA username (e.g. `p1234567`) **required** |
 | `PIA_PASS` | — | PIA password **required** |
-| `DIP_TOKEN` | *(blank)* | Dedicated IP token from PIA dashboard; blank = standard account |
+| `DIP_TOKEN` | *(blank)* | Dedicated IP token from your PIA account; blank = standard shared-IP account |
+| `DIP_HOSTNAME` | *(blank)* | Manual server override — only needed if the automatic API lookup fails |
+| `DIP_SERVER_IP` | *(blank)* | Manual server IP override — only needed if the automatic API lookup fails |
 | `PIA_REGION` | `us_east` | Server region; ignored when `DIP_TOKEN` is set |
 | `PROFILE_NAME` | `PIA_WG` | WireGuard interface name and Firewalla profile name (max 15 chars) |
 | `WG_MANAGED_BY_FIREWALLA` | `false` | `true` = Firewalla owns the interface; `false` = script uses wg-quick |
@@ -329,7 +331,7 @@ sudo ./pia-wg-firewalla.sh reconnect --new-token
 ```
 
 **Profile not appearing in the Firewalla app**
-Check that the three profile files exist in `/home/pi/.firewalla/run/wg_profile/`. In Docker, the Firewalla volume mounts in `docker-compose.yml` must be uncommented and `WG_MANAGED_BY_FIREWALLA` set to `true`.
+Check that the three profile files exist in `/home/pi/.firewalla/run/wg_profile/` and are owned by `pi`. Verify `WG_MANAGED_BY_FIREWALLA` is set to `true` in your compose file.
 
 **Handshake never completes**
 UDP port 1337 may be blocked by your ISP or upstream router. Try a different region:
@@ -338,7 +340,7 @@ docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect --region us_west
 ```
 
 **Dedicated IP token rejected**
-`DIP_TOKEN` is the token string from the PIA dashboard — it's separate from your password. `PIA_USER` and `PIA_PASS` are still required alongside it for the initial authentication step.
+`DIP_TOKEN` is the token string from your PIA account — it's separate from your password. `PIA_USER` and `PIA_PASS` are still required alongside it for the initial authentication step.
 
 ---
 
