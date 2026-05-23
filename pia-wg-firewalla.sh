@@ -498,11 +498,12 @@ EOF
 build_firewalla_profiles() {
   local server_resp="$1"
   local server_ip="$2"
+  local server_cn="${3:-${server_ip}}"
 
   local privkey peer_ip server_key server_port dns dns_json
   privkey=$(cat "${DATA_DIR}/private.key")
   peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
-  # PIA sometimes omits the prefix length — wg-quick requires CIDR notation
+  # PIA sometimes omits the prefix length
   [[ "${peer_ip}" != */* ]] && peer_ip="${peer_ip}/32"
   server_key=$(echo "${server_resp}" | jq -r '.server_key')
   server_port=$(echo "${server_resp}"| jq -r '.server_port')
@@ -512,49 +513,26 @@ build_firewalla_profiles() {
   local name="${PROFILE_NAME}"
 
   # .conf — WireGuard native format (no wg-quick extensions).
-  # Firewalla reads this with plain wg commands; Address and DNS are handled
-  # from the .json file and Firewalla's own DNS management respectively.
-  cat > "${DATA_DIR}/${name}.conf" <<EOF
-[Interface]
-PrivateKey = ${privkey}
-
-[Peer]
-PublicKey = ${server_key}
-AllowedIPs = 0.0.0.0/0
-Endpoint = ${server_ip}:${server_port}
-PersistentKeepalive = 25
-EOF
+  # Firewalla reads this with plain wg commands; Address and DNS are managed
+  # via .json and Firewalla's own subsystem.
+  printf '[Interface]\nPrivateKey = %s\n[Peer]\nPublicKey = %s\nEndpoint = %s:%s\nPersistentKeepalive = 25\nAllowedIPs = 0.0.0.0/0\n' \
+    "${privkey}" "${server_key}" "${server_ip}" "${server_port}" \
+    > "${DATA_DIR}/${name}.conf"
   chmod 600 "${DATA_DIR}/${name}.conf"
 
-  # .json — Firewalla VPN peer metadata
-  cat > "${DATA_DIR}/${name}.json" <<EOF
-{
-  "peers": [
-    {
-      "publicKey": "${server_key}",
-      "endpoint": "${server_ip}:${server_port}",
-      "persistentKeepalive": 25,
-      "allowedIPs": ["0.0.0.0/0"]
-    }
-  ],
-  "addresses": ["${peer_ip}"],
-  "privateKey": "${privkey}",
-  "dns": ${dns_json}
-}
-EOF
+  # .json — Firewalla VPN peer metadata (compact single-line, matches Firewalla format)
+  printf '{"peers":[{"publicKey":"%s","endpoint":"%s:%s","persistentKeepalive":25,"allowedIPs":["0.0.0.0/0"]}],"addresses":["%s"],"privateKey":"%s","dns":%s}\n' \
+    "${server_key}" "${server_ip}" "${server_port}" "${peer_ip}" "${privkey}" "${dns_json}" \
+    > "${DATA_DIR}/${name}.json"
   chmod 600 "${DATA_DIR}/${name}.json"
 
-  # .settings — Firewalla routing policy
-  cat > "${DATA_DIR}/${name}.settings" <<EOF
-{
-  "serverSubnets": [],
-  "overrideDefaultRoute": true,
-  "routeDNS": true,
-  "strictVPN": true,
-  "createdDate": $(date +%s),
-  "subtype": "wireguard"
-}
-EOF
+  # .settings — Firewalla routing policy (compact single-line, matches working profiles)
+  # routeDNS:false — "true" causes iptables chain name to exceed 29-char kernel limit
+  # strictVPN:false — avoids routing conflicts during tunnel establishment
+  local created_date; created_date="$(date +%s).0"
+  printf '{"serverSubnets":[],"overrideDefaultRoute":true,"routeDNS":false,"c2sSNATDisabled":false,"strictVPN":false,"createdDate":%s,"displayName":"%s","serverVPNPort":%s,"serverDDNS":"%s","subtype":"wireguard"}\n' \
+    "${created_date}" "${PROFILE_NAME}" "${server_port}" "${server_cn}" \
+    > "${DATA_DIR}/${name}.settings"
   chmod 644 "${DATA_DIR}/${name}.settings"
 
   # .endpoint_routes — tells Firewalla to route traffic to the VPN server IP via
@@ -689,7 +667,7 @@ do_setup() {
 
   # Always build Firewalla profiles (they go to DATA_DIR at minimum)
   local fw_name
-  fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}")
+  fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}" "${server_cn}")
   deploy_to_firewalla "${fw_name}"
 
   if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
