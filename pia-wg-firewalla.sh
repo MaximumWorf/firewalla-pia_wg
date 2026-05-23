@@ -557,7 +557,29 @@ EOF
 EOF
   chmod 644 "${DATA_DIR}/${name}.settings"
 
-  info "Firewalla profile files written: ${name}.{conf,json,settings}"
+  # .endpoint_routes — tells Firewalla to route traffic to the VPN server IP via
+  # the normal gateway rather than through the not-yet-up tunnel (prevents handshake loop)
+  local gw dev pref=8192
+  gw=$(ip route show default 2>/dev/null | awk '/default via/{print $3; exit}')
+  dev=$(ip route show default 2>/dev/null | awk '/default via/{print $5; exit}')
+  # Borrow the lowest pref from any existing endpoint_routes (= primary WAN priority)
+  local ep_file p
+  for ep_file in "${FW_PROFILE_DIR}"/*.endpoint_routes; do
+    [[ -f "${ep_file}" ]] || continue
+    p=$(jq -r '.[0].pref // empty' "${ep_file}" 2>/dev/null || true)
+    [[ -n "${p}" && "${p}" -lt "${pref}" ]] && pref="${p}"
+  done
+
+  if [[ -n "${gw}" && -n "${dev}" ]]; then
+    printf '[{"ip":"%s","gw":"%s","dev":"%s","pref":%s}]' \
+      "${server_ip}" "${gw}" "${dev}" "${pref}" \
+      > "${DATA_DIR}/${name}.endpoint_routes"
+    info "Endpoint routes: ${server_ip} via ${gw} dev ${dev} pref ${pref}"
+  else
+    warn "Could not detect default gateway — .endpoint_routes not written; Firewalla may fail to connect"
+  fi
+
+  info "Firewalla profile files written: ${name}.{conf,json,settings,endpoint_routes}"
   echo "${name}"
 }
 
@@ -572,8 +594,10 @@ deploy_to_firewalla() {
       cat "${DATA_DIR}/${name}.conf"     > "${fw_dir}/${name}.conf"
       cat "${DATA_DIR}/${name}.json"     > "${fw_dir}/${name}.json"
       cat "${DATA_DIR}/${name}.settings" > "${fw_dir}/${name}.settings"
+      [[ -f "${DATA_DIR}/${name}.endpoint_routes" ]] && \
+        cat "${DATA_DIR}/${name}.endpoint_routes" > "${fw_dir}/${name}.endpoint_routes"
       # Use numeric UID/GID — the container (Alpine) has no "pi" user
-      chown 1000:1000 "${fw_dir}/${name}.conf" "${fw_dir}/${name}.json" "${fw_dir}/${name}.settings" 2>/dev/null || true
+      chown 1000:1000 "${fw_dir}/${name}".* 2>/dev/null || true
       info "Deployed to ${fw_dir}"
       (( deployed++ )) || true
     fi
