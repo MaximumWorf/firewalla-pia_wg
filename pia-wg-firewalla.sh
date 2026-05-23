@@ -92,8 +92,8 @@ DIP_PORT="${DIP_PORT:-1337}"
 
 # ── Derive interface name (max 15 chars, Linux IFNAMSIZ limit) ─────────────────
 WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
-# Firewalla prefixes its managed WireGuard interfaces with "vpn_".
-# WG_IFACE_ACTUAL is the real kernel interface name; WG_IFACE is the profile name.
+# WG_IFACE_ACTUAL is the real kernel interface name.
+# In Firewalla mode it is vpn_${PROFILE_NAME} (Firewalla's naming); updated after load_env.
 WG_IFACE_ACTUAL="${WG_IFACE}"
 
 # ── Terminal colours (disabled when not a tty) ─────────────────────────────────
@@ -142,7 +142,8 @@ load_env() {
   # Re-derive interface names after env load in case PROFILE_NAME or mode changed
   WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
   if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
-    WG_IFACE_ACTUAL="vpn_${WG_IFACE}"
+    # Firewalla uses the full PROFILE_NAME (no truncation) with a vpn_ prefix
+    WG_IFACE_ACTUAL="vpn_${PROFILE_NAME}"
   else
     WG_IFACE_ACTUAL="${WG_IFACE}"
   fi
@@ -510,12 +511,12 @@ build_firewalla_profiles() {
 
   local name="${PROFILE_NAME}"
 
-  # .conf — wg-quick format (Firewalla reads this directly)
+  # .conf — WireGuard native format (no wg-quick extensions).
+  # Firewalla reads this with plain wg commands; Address and DNS are handled
+  # from the .json file and Firewalla's own DNS management respectively.
   cat > "${DATA_DIR}/${name}.conf" <<EOF
 [Interface]
-Address = ${peer_ip}
 PrivateKey = ${privkey}
-DNS = ${dns}
 
 [Peer]
 PublicKey = ${server_key}
@@ -571,7 +572,8 @@ deploy_to_firewalla() {
       cat "${DATA_DIR}/${name}.conf"     > "${fw_dir}/${name}.conf"
       cat "${DATA_DIR}/${name}.json"     > "${fw_dir}/${name}.json"
       cat "${DATA_DIR}/${name}.settings" > "${fw_dir}/${name}.settings"
-      chown pi:pi "${fw_dir}/${name}.conf" "${fw_dir}/${name}.json" "${fw_dir}/${name}.settings" 2>/dev/null || true
+      # Use numeric UID/GID — the container (Alpine) has no "pi" user
+      chown 1000:1000 "${fw_dir}/${name}.conf" "${fw_dir}/${name}.json" "${fw_dir}/${name}.settings" 2>/dev/null || true
       info "Deployed to ${fw_dir}"
       (( deployed++ )) || true
     fi
