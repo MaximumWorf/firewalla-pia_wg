@@ -546,9 +546,12 @@ build_firewalla_profiles() {
   # .settings — Firewalla routing policy (compact single-line, matches working profiles)
   # routeDNS:false — "true" causes iptables chain name to exceed 29-char kernel limit
   # strictVPN:false — avoids routing conflicts during tunnel establishment
+  # serverDDNS must resolve to the VPN server IP so Firewalla can add the endpoint route
+  # (bypassing the tunnel for handshake packets).  PIA's short CN ("chicago424") isn't a
+  # resolvable FQDN, so we use the numeric IP — getaddrinfo() handles IP strings directly.
   local created_date; created_date="$(date +%s).0"
   printf '{"serverSubnets":[],"overrideDefaultRoute":true,"routeDNS":false,"c2sSNATDisabled":false,"strictVPN":false,"createdDate":%s,"displayName":"%s","serverVPNPort":%s,"serverDDNS":"%s","subtype":"wireguard"}\n' \
-    "${created_date}" "${PROFILE_NAME}" "${server_port}" "${server_cn}" \
+    "${created_date}" "${PROFILE_NAME}" "${server_port}" "${server_ip}" \
     > "${DATA_DIR}/${name}.settings"
   chmod 644 "${DATA_DIR}/${name}.settings"
 
