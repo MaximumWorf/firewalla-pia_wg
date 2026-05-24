@@ -75,6 +75,9 @@ WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
 HANDSHAKE_MAX_AGE="${HANDSHAKE_MAX_AGE:-120}"
 MAX_DOWN_TIME="${MAX_DOWN_TIME:-300}"
 MAX_RECONNECT_ATTEMPTS="${MAX_RECONNECT_ATTEMPTS:-5}"
+# In Firewalla mode: re-register WireGuard key this often (seconds) while the
+# interface is down, so the PIA server always has a fresh peer entry ready.
+KEY_REFRESH_INTERVAL="${KEY_REFRESH_INTERVAL:-150}"
 VPN_CHECK_IP="${VPN_CHECK_IP:-9.9.9.9}"
 WG_DNS_OVERRIDE="${WG_DNS_OVERRIDE:-}"
 # Set to "true" when Firewalla manages the WireGuard interface (no wg-quick)
@@ -234,6 +237,20 @@ get_dip_server() {
     info "Using manually specified DIP server: ${DIP_HOSTNAME} (${DIP_SERVER_IP})"
     echo "${DIP_HOSTNAME}|${DIP_SERVER_IP}"
     return 0
+  fi
+
+  # Cache the DIP server info — your dedicated IP's server never changes.
+  # This avoids a redundant API call on every key refresh in the watchdog.
+  local cache="${DATA_DIR}/dip_server.json"
+  if [[ -f "${cache}" ]]; then
+    local cached_cn cached_ip
+    cached_cn=$(jq -r '.cn // empty' "${cache}" 2>/dev/null || true)
+    cached_ip=$(jq -r '.ip // empty' "${cache}" 2>/dev/null || true)
+    if [[ -n "${cached_cn}" && -n "${cached_ip}" ]]; then
+      info "Using cached DIP server: ${cached_cn} (${cached_ip})"
+      echo "${cached_cn}|${cached_ip}"
+      return 0
+    fi
   fi
 
   log "Resolving Dedicated IP server via PIA API..."
@@ -683,6 +700,8 @@ do_setup() {
     fi
   fi
 
+  # Record timestamp so the watchdog knows when keys were last registered
+  touch "${DATA_DIR}/last_setup"
   log "=== Setup complete ==="
 }
 
@@ -732,8 +751,16 @@ run_watchdog() {
     if ! is_iface_up; then
       if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
         # Interface down is normal in Firewalla mode — the app controls it.
-        # Don't count as downtime or we'll re-register keys and kill an active session.
-        log "Interface ${WG_IFACE_ACTUAL} not up — waiting for Firewalla app"
+        # However, PIA expires key registrations if no handshake arrives within
+        # ~3 minutes of addKey. Refresh periodically so the registration is always
+        # fresh when the user taps Connect in the Firewalla app.
+        local key_age; key_age=$(file_age "${DATA_DIR}/last_setup")
+        if (( key_age >= KEY_REFRESH_INTERVAL )); then
+          log "Key registration is ${key_age}s old (limit ${KEY_REFRESH_INTERVAL}s) — refreshing..."
+          do_setup "false" "false"
+        else
+          log "Interface ${WG_IFACE_ACTUAL} not up — Firewalla manages connection (key registered ${key_age}s ago, refresh in $(( KEY_REFRESH_INTERVAL - key_age ))s)"
+        fi
       else
         warn "Interface ${WG_IFACE_ACTUAL} is not up"
         (( down_time += WATCHDOG_INTERVAL ))
