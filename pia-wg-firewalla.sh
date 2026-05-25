@@ -82,6 +82,13 @@ VPN_CHECK_IP="${VPN_CHECK_IP:-9.9.9.9}"
 WG_DNS_OVERRIDE="${WG_DNS_OVERRIDE:-}"
 # Set to "true" when Firewalla manages the WireGuard interface (no wg-quick)
 WG_MANAGED_BY_FIREWALLA="${WG_MANAGED_BY_FIREWALLA:-false}"
+# Hash-based profile ID created by the Firewalla app (e.g. "682D_682DF").
+# Obtain it after pasting the output of 'generate-config' into the Firewalla
+# app: VPN Client → Add VPN → WireGuard → paste config.
+# Then run: ls -t ~/.firewalla/run/wg_profile/*.conf | head -1
+# Set to the filename without the .conf extension.
+# When blank, the script creates profile files itself (legacy mode).
+FIREWALLA_PROFILE_ID="${FIREWALLA_PROFILE_ID:-}"
 # Credentials — must be set in .env or environment
 PIA_USER="${PIA_USER:-}"
 PIA_PASS="${PIA_PASS:-}"
@@ -145,8 +152,13 @@ load_env() {
   # Re-derive interface names after env load in case PROFILE_NAME or mode changed
   WG_IFACE="$(echo "${PROFILE_NAME}" | tr -cd 'A-Za-z0-9_-' | cut -c1-15)"
   if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
-    # Firewalla uses the full PROFILE_NAME (no truncation) with a vpn_ prefix
-    WG_IFACE_ACTUAL="vpn_${PROFILE_NAME}"
+    if [[ -n "${FIREWALLA_PROFILE_ID}" ]]; then
+      # App-created profile: Firewalla prefixes the hash-based ID with vpn_
+      WG_IFACE_ACTUAL="vpn_${FIREWALLA_PROFILE_ID}"
+    else
+      # Legacy external-profile mode: Firewalla prefixes PROFILE_NAME with vpn_
+      WG_IFACE_ACTUAL="vpn_${PROFILE_NAME}"
+    fi
   else
     WG_IFACE_ACTUAL="${WG_IFACE}"
   fi
@@ -613,6 +625,155 @@ deploy_to_firewalla() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# App-integration mode: update a Firewalla-app-created profile in place
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Update the .conf (and .json) of a profile the user created via the Firewalla
+# app.  The app assigns a hash-based profile ID (e.g. "682D_682DF"); set
+# FIREWALLA_PROFILE_ID to that value.
+#
+# Why this works better than creating profiles externally:
+#   When the user pastes a WireGuard config into the Firewalla app, Firewalla
+#   fully registers the profile in its internal state, including IP assignment
+#   and routing.  Subsequent updates to the same .conf/.json files are then
+#   picked up cleanly on the next connect (or via wg syncconf if already up).
+#
+# .conf format: wg-quick (includes Address = ...) so Firewalla knows what IP
+#   to assign to the interface via `ip addr add`.
+update_existing_profile() {
+  local server_resp="$1"
+  local server_ip="$2"
+
+  local privkey peer_ip server_key server_port dns dns_json
+  privkey=$(cat "${DATA_DIR}/private.key")
+  peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  [[ "${peer_ip}" != */* ]] && peer_ip="${peer_ip}/32"
+  server_key=$(echo "${server_resp}" | jq -r '.server_key')
+  server_port=$(echo "${server_resp}"| jq -r '.server_port')
+  dns=$(_resolve_dns "${server_resp}")
+  dns_json=$(echo "${dns}" | tr ',' '\n' | jq -R . | jq -sc .)
+
+  local deployed=0
+  for fw_dir in "${FW_PROFILE_DIR}" "${FW_OVERLAY_DIR}"; do
+    local target_conf="${fw_dir}/${FIREWALLA_PROFILE_ID}.conf"
+    local target_json="${fw_dir}/${FIREWALLA_PROFILE_ID}.json"
+    [[ -f "${target_conf}" ]] || continue
+
+    # Write wg-quick format conf WITH Address.
+    # Firewalla parses Address to run `ip addr add <peer_ip> dev <iface>` before
+    # calling `wg setconf` (which strips wg-quick extensions).
+    {
+      printf '[Interface]\nPrivateKey = %s\nAddress = %s\n' "${privkey}" "${peer_ip}"
+      # Preserve any DNS line the user may have added via the app
+      grep -E '^DNS[[:space:]]*=' "${target_conf}" 2>/dev/null || true
+      printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' \
+        "${server_key}" "${server_ip}" "${server_port}"
+    } > "${target_conf}.new"
+    mv "${target_conf}.new" "${target_conf}"
+    chmod 600 "${target_conf}"
+
+    # Update .json — peer public key and endpoint change on each registration
+    if [[ -f "${target_json}" ]]; then
+      printf '{"peers":[{"publicKey":"%s","endpoint":"%s:%s","persistentKeepalive":25,"allowedIPs":["0.0.0.0/0"]}],"addresses":["%s"],"privateKey":"%s","dns":%s}\n' \
+        "${server_key}" "${server_ip}" "${server_port}" "${peer_ip}" "${privkey}" "${dns_json}" \
+        > "${target_json}.new"
+      mv "${target_json}.new" "${target_json}"
+      chmod 600 "${target_json}"
+    fi
+
+    chown 1000:1000 "${fw_dir}/${FIREWALLA_PROFILE_ID}".* 2>/dev/null || true
+    info "Updated Firewalla profile '${FIREWALLA_PROFILE_ID}' in ${fw_dir}"
+    (( deployed++ )) || true
+  done
+
+  if (( deployed == 0 )); then
+    err "Profile '${FIREWALLA_PROFILE_ID}.conf' not found in Firewalla profile directories."
+    err "Run 'generate-config', paste the output into the Firewalla app"
+    err "(VPN Client → Add VPN → WireGuard → paste config), then set FIREWALLA_PROFILE_ID."
+    return 1
+  fi
+
+  # Hot-reload if the interface is already active (no connection drop)
+  if is_iface_up; then
+    info "Interface ${WG_IFACE_ACTUAL} active — hot-reloading config via wg syncconf"
+    _wg_syncconf "${FW_PROFILE_DIR}/${FIREWALLA_PROFILE_ID}.conf"
+  fi
+}
+
+# Generate a wg-quick format config for initial import into the Firewalla app.
+# Usage: ./pia-wg-firewalla.sh generate-config [--new-keys] [--new-token]
+generate_wg_config() {
+  local force_keys="${1:-false}"
+  local force_token="${2:-false}"
+
+  log "=== Generating PIA WireGuard config (for Firewalla app import) ==="
+  [[ -n "${DIP_TOKEN}" ]] && info "Mode: Dedicated IP" || info "Mode: Standard (region: ${PIA_REGION})"
+
+  init_data_dir
+
+  local pubkey; pubkey=$(ensure_wg_keys "${force_keys}")
+  local auth_token; auth_token=$(get_pia_token "${force_token}")
+
+  local server_cn server_ip server_port=1337 is_dip=false
+  if [[ -n "${DIP_TOKEN}" ]]; then
+    is_dip=true
+    local pair; pair=$(get_dip_server "${auth_token}")
+    server_cn="${pair%%|*}"; server_ip="${pair#*|}"
+    server_port="${DIP_PORT:-1337}"
+  else
+    local pair; pair=$(select_server "${PIA_REGION}")
+    IFS='|' read -r server_cn server_ip server_port <<< "${pair}"
+  fi
+
+  local server_resp
+  server_resp=$(register_key "${auth_token}" "${server_cn}" "${server_ip}" "${pubkey}" "${is_dip}" "${server_port}")
+
+  local peer_ip server_key
+  peer_ip=$(echo "${server_resp}"    | jq -r '.peer_ip')
+  [[ "${peer_ip}" != */* ]] && peer_ip="${peer_ip}/32"
+  server_key=$(echo "${server_resp}" | jq -r '.server_key')
+
+  touch "${DATA_DIR}/last_setup"
+  echo "${server_resp}" > "${DATA_DIR}/server.json"
+
+  # Print to stdout for the user to copy
+  cat <<EOF
+
+══════════════════════════════════════════════════════════════
+ STEP 1 — Copy this WireGuard config:
+══════════════════════════════════════════════════════════════
+
+[Interface]
+PrivateKey = $(cat "${DATA_DIR}/private.key")
+Address = ${peer_ip}
+
+[Peer]
+PublicKey = ${server_key}
+AllowedIPs = 0.0.0.0/0
+Endpoint = ${server_ip}:${server_port}
+PersistentKeepalive = 25
+
+══════════════════════════════════════════════════════════════
+ STEP 2 — Paste into the Firewalla app:
+   Network → VPN Client → Add VPN → WireGuard → paste above
+   Give it any name (e.g. "PIA-DIP"), then Save (don't enable yet).
+
+ STEP 3 — Find the profile ID Firewalla assigned:
+   ls -t ~/.firewalla/run/wg_profile/*.conf | head -1
+   (use the filename without .conf, e.g. "682D_682DF")
+
+ STEP 4 — Set it in docker-compose.yml:
+   FIREWALLA_PROFILE_ID: "682D_682DF"
+
+ STEP 5 — Restart the container and enable VPN in app:
+   docker compose up -d
+   Then: Firewalla app → VPN Client → [your profile] → Enable
+══════════════════════════════════════════════════════════════
+
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # WireGuard interface management (standalone mode only)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -685,22 +846,30 @@ do_setup() {
   local server_resp
   server_resp=$(register_key "${auth_token}" "${server_cn}" "${server_ip}" "${pubkey}" "${is_dip}" "${server_port}")
 
-  # Always build Firewalla profiles (they go to DATA_DIR at minimum)
-  local fw_name
-  fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}" "${server_cn}")
-  deploy_to_firewalla "${fw_name}"
+  if [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" && -n "${FIREWALLA_PROFILE_ID}" ]]; then
+    # ── App-integration mode ──────────────────────────────────────────────────
+    # Update the existing Firewalla-app-created profile files in place.
+    # The user created this profile by pasting the 'generate-config' output into
+    # the Firewalla app; we just keep its keys/endpoint/address up to date.
+    update_existing_profile "${server_resp}" "${server_ip}"
 
-  if [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]]; then
-    # Standalone mode: also write the wg-quick conf and bring up the interface
-    write_wg_conf "${server_resp}" "${server_ip}"
-    wg_up
-  else
-    # Firewalla mode: sync config if the interface is already active
+  elif [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
+    # ── Legacy external-profile mode ─────────────────────────────────────────
+    # Create Firewalla profile files from scratch (no FIREWALLA_PROFILE_ID set).
+    local fw_name
+    fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}" "${server_cn}")
+    deploy_to_firewalla "${fw_name}"
     if is_iface_up; then
       local fw_conf="${DATA_DIR}/${PROFILE_NAME}.conf"
       info "Interface ${WG_IFACE_ACTUAL} is active — syncing new config"
       _wg_syncconf "${fw_conf}"
     fi
+
+  else
+    # ── Standalone mode ───────────────────────────────────────────────────────
+    # wg-quick manages the interface directly (no Firewalla app involvement).
+    write_wg_conf "${server_resp}" "${server_ip}"
+    wg_up
   fi
 
   # Record timestamp so the watchdog knows when keys were last registered
@@ -873,12 +1042,20 @@ ${BOLD}USAGE${NC}
   $0 <command> [options]
 
 ${BOLD}COMMANDS${NC}
-  start          Setup + launch watchdog (use for Docker / systemd)
-  setup          One-time setup (generate config, deploy to Firewalla)
-  reconnect      Force fresh token + reconnect
-  watchdog       Run watchdog loop (assumes VPN already active)
-  status         Show VPN health, token TTL, and connection info
-  list-regions   List all available PIA WireGuard regions
+  generate-config  Generate initial WireGuard config to paste into the Firewalla app
+  start            Setup + launch watchdog (use for Docker / systemd)
+  setup            One-time setup / key refresh
+  reconnect        Force fresh token + reconnect
+  watchdog         Run watchdog loop (assumes VPN already active)
+  status           Show VPN health, token TTL, and connection info
+  list-regions     List all available PIA WireGuard regions
+
+${BOLD}RECOMMENDED WORKFLOW (Firewalla app integration)${NC}
+  1.  docker compose exec pia-wg /app/pia-wg-firewalla.sh generate-config
+  2.  Paste the printed config into Firewalla app → VPN Client → Add VPN → WireGuard
+  3.  ls -t ~/.firewalla/run/wg_profile/*.conf | head -1   # find the profile ID
+  4.  Set FIREWALLA_PROFILE_ID in docker-compose.yml and restart the container
+  5.  Enable the VPN once in the Firewalla app — watchdog keeps it fresh
 
 ${BOLD}OPTIONS${NC}
   --new-keys     Regenerate WireGuard private/public keypair
@@ -886,12 +1063,12 @@ ${BOLD}OPTIONS${NC}
   --region R     Override PIA_REGION for this run
   --profile N    Override PROFILE_NAME for this run
 
-${BOLD}KEY ENVIRONMENT VARIABLES${NC}  (set in .env or export before running)
+${BOLD}KEY ENVIRONMENT VARIABLES${NC}  (set in docker-compose.yml or .env)
   PIA_USER                  PIA username (required)
   PIA_PASS                  PIA password (required)
   DIP_TOKEN                 Dedicated IP token (omit for standard account)
   PIA_REGION                Server region, default: us_east
-  PROFILE_NAME              VPN profile / interface name, default: PIA_WG
+  FIREWALLA_PROFILE_ID      Hash-based profile ID from Firewalla app (recommended)
   WG_MANAGED_BY_FIREWALLA   true = Firewalla owns wg interface, default: false
   DATA_DIR                  State directory, default: /data/pia-wg
   WG_DNS_OVERRIDE           Comma-separated DNS servers (overrides PIA DNS)
@@ -921,6 +1098,10 @@ main() {
   done
 
   case "${cmd}" in
+    generate-config)
+      load_env; check_deps
+      generate_wg_config "${force_keys}" "${force_token}"
+      ;;
     start)
       load_env; check_deps
       # Give the host network a moment to be ready before the first API call

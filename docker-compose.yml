@@ -2,10 +2,15 @@
 # PIA WireGuard for Firewalla
 # Docs & full config reference: https://github.com/MaximumWorf/firewalla-pia_wg
 #
+# First-time setup:
+#   docker compose exec pia-wg /app/pia-wg-firewalla.sh generate-config
+#   → paste output into Firewalla app: VPN Client → Add VPN → WireGuard
+#   → find profile ID: ls -t ~/.firewalla/run/wg_profile/*.conf | head -1
+#   → set FIREWALLA_PROFILE_ID below, then: docker compose up -d
+#
 # Update image:    docker compose pull && docker compose up -d
 # View logs:       docker compose logs -f
 # Force reconnect: docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
-# Show status:     docker compose exec pia-wg /app/pia-wg-firewalla.sh status
 version: "3.9"
 
 services:
@@ -27,24 +32,24 @@ services:
       PIA_USER: ""
       PIA_PASS: ""
 
-      # Dedicated IP — leave DIP_TOKEN blank for a standard shared-IP account
+      # Dedicated IP — leave blank for a standard shared-IP account
       DIP_TOKEN: ""
-      # Manual server override — only needed if the automatic API lookup fails.
-      # The script resolves these automatically from DIP_TOKEN; set manually as a last resort.
       DIP_HOSTNAME: ""
       DIP_SERVER_IP: ""
       DIP_PORT: "1337"
 
       # Region — ignored when DIP_TOKEN is set
-      # Run list-regions command above for available IDs
       PIA_REGION: "us_east"
 
-      # Display name in Firewalla app and WireGuard interface name (max 15 chars)
-      PROFILE_NAME: "PIA_WG"
-
-      # true  = Firewalla app manages the interface (enable once in app after first run)
-      # false = container manages WireGuard directly via wg-quick
+      # ── Firewalla app integration (recommended) ────────────────────────────
+      # Run 'generate-config', paste into Firewalla app, then set the profile
+      # ID here (filename without .conf from ~/.firewalla/run/wg_profile/).
+      FIREWALLA_PROFILE_ID: ""
       WG_MANAGED_BY_FIREWALLA: "true"
+
+      # Legacy: only used when FIREWALLA_PROFILE_ID is blank (creates profile
+      # files externally instead of updating an app-created profile).
+      PROFILE_NAME: "PIA_WG"
 
       # Leave blank to use PIA's DNS (recommended). Override: "1.1.1.1,1.0.0.1"
       WG_DNS_OVERRIDE: ""
@@ -57,7 +62,7 @@ services:
       DATA_DIR: "/data/pia-wg"
 
     healthcheck:
-      test: ["CMD", "sh", "-c", "ip link show $${PROFILE_NAME:-PIA_WG} | grep -q UP"]
+      test: ["CMD", "sh", "-c", "wg show 2>/dev/null | grep -q interface || true"]
       interval: 60s
       timeout: 10s
       retries: 3
