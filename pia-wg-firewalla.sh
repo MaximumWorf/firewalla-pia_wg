@@ -681,6 +681,20 @@ update_existing_profile() {
       chmod 600 "${target_json}"
     fi
 
+    # Update .settings — serverDDNS is used by Firewalla to add the endpoint
+    # bypass route (traffic to the VPN server must NOT go through the tunnel).
+    # serverVPNPort drives the same route; both must reflect the current server.
+    # We patch only these two fields so we don't clobber the user's app settings
+    # (displayName, device routing rules, overrideDefaultRoute, strictVPN, etc.).
+    local target_settings="${fw_dir}/${FIREWALLA_PROFILE_ID}.settings"
+    if [[ -f "${target_settings}" ]]; then
+      jq --arg ip "${server_ip}" --argjson port "${server_port}" \
+        '.serverDDNS = $ip | .serverVPNPort = $port' \
+        "${target_settings}" > "${target_settings}.new"
+      mv "${target_settings}.new" "${target_settings}"
+      chmod 644 "${target_settings}"
+    fi
+
     chown 1000:1000 "${fw_dir}/${FIREWALLA_PROFILE_ID}".* 2>/dev/null || true
     info "Updated Firewalla profile '${FIREWALLA_PROFILE_ID}' in ${fw_dir}"
     (( deployed++ )) || true
