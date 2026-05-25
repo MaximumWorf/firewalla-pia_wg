@@ -1104,6 +1104,19 @@ main() {
       ;;
     start)
       load_env; check_deps
+
+      # Tee all output (stdout + stderr) to a persistent log file so the web UI
+      # can serve it, while still showing in `docker compose logs`.
+      local log_file="${DATA_DIR}/pia-wg.log"
+      exec > >(tee -a "${log_file}") 2>&1
+
+      # ── Web UI ──────────────────────────────────────────────────────────
+      local web_port="${WEB_PORT:-8080}"
+      if [[ "${web_port}" != "0" ]]; then
+        python3 /app/web_ui.py 2>&1 &
+        log "Web UI started on port ${web_port} — open http://<firewalla-ip>:${web_port}"
+      fi
+
       # Give the host network a moment to be ready before the first API call
       log "Waiting 5s for network to initialise..."
       sleep 5

@@ -13,6 +13,7 @@ A self-contained WireGuard VPN manager for [Firewalla](https://firewalla.com) th
 | **Always-on watchdog** | Checks handshake age and pings through the tunnel; reconnects with exponential back-off |
 | **Firewalla native** | Writes `.conf` / `.json` / `.settings` profile files that appear in the Firewalla VPN Client UI |
 | **Docker — no clone needed** | Pull a pre-built image, fill in two fields, run |
+| **Web UI** | Browser dashboard at `http://<firewalla-ip>:8080` — status, logs, settings, generate config |
 | **Latency-aware server selection** | Pings every server in the region, picks the fastest |
 | **Persistent keys** | WireGuard keypair and token cache survive restarts |
 
@@ -60,6 +61,18 @@ docker compose logs -f
 ```
 
 The container pulls the image, authenticates with PIA, selects the fastest server in the region, and brings up the WireGuard tunnel. The watchdog then runs forever inside the container.
+
+### Web UI
+
+Once the container is running, open **`http://<firewalla-ip>:8080`** in any browser for a dashboard that shows:
+
+- Tunnel status (up/down, last handshake, token TTL, key refresh countdown)
+- **Generate Config for App** — registers a fresh key and shows the wg-quick block to paste into the Firewalla app
+- **Reconnect** button — triggers an immediate key refresh
+- **Settings** editor — saves to `/data/pia-wg/.env`; restart the container to apply
+- **Logs** — tailing the live container log
+
+To disable the web UI, set `WEB_PORT: "0"` in `docker-compose.yml`.
 
 ### Useful commands
 
