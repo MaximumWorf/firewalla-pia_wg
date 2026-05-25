@@ -213,6 +213,7 @@ button{padding:8px 16px;border:none;border-radius:7px;cursor:pointer;font-size:1
 <ol style="font-size:13px;line-height:1.8;color:#374151;margin:0 0 14px 18px">
 <li>Copy the config above (click → Ctrl+A, Ctrl+C)</li>
 <li>Firewalla app → <strong>VPN Client → Add VPN → WireGuard</strong> → paste → Save</li>
+<li>In the Firewalla app, <strong>enable the VPN connection</strong> you just created — the profile file won't appear on disk until it has been toggled on at least once</li>
 <li>Find profile ID: <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px">ls -t ~/.firewalla/run/wg_profile/*.conf | head -1</code></li>
 <li>Close this modal → paste the profile ID into the <strong>Firewalla Profile ID</strong> field in Settings → <strong>Save</strong> → restart the container</li>
 </ol>
