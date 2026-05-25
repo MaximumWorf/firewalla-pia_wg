@@ -681,6 +681,20 @@ update_existing_profile() {
       chmod 600 "${target_json}"
     fi
 
+    # Update .settings — serverDDNS is used by Firewalla to add the endpoint
+    # bypass route (traffic to the VPN server must NOT go through the tunnel).
+    # serverVPNPort drives the same route; both must reflect the current server.
+    # We patch only these two fields so we don't clobber the user's app settings
+    # (displayName, device routing rules, overrideDefaultRoute, strictVPN, etc.).
+    local target_settings="${fw_dir}/${FIREWALLA_PROFILE_ID}.settings"
+    if [[ -f "${target_settings}" ]]; then
+      jq --arg ip "${server_ip}" --argjson port "${server_port}" \
+        '.serverDDNS = $ip | .serverVPNPort = $port' \
+        "${target_settings}" > "${target_settings}.new"
+      mv "${target_settings}.new" "${target_settings}"
+      chmod 644 "${target_settings}"
+    fi
+
     chown 1000:1000 "${fw_dir}/${FIREWALLA_PROFILE_ID}".* 2>/dev/null || true
     info "Updated Firewalla profile '${FIREWALLA_PROFILE_ID}' in ${fw_dir}"
     (( deployed++ )) || true
@@ -693,10 +707,12 @@ update_existing_profile() {
     return 1
   fi
 
-  # Hot-reload if the interface is already active (no connection drop)
+  # Hot-reload if the interface is already active.
+  # _fw_hot_reload handles all three layers: bypass route, wg syncconf, and
+  # ip addr — so there is no window with a stale route or wrong peer IP.
   if is_iface_up; then
-    info "Interface ${WG_IFACE_ACTUAL} active — hot-reloading config via wg syncconf"
-    _wg_syncconf "${FW_PROFILE_DIR}/${FIREWALLA_PROFILE_ID}.conf"
+    info "Interface ${WG_IFACE_ACTUAL} active — hot-reloading (addr + bypass route + wg keys)"
+    _fw_hot_reload "${FW_PROFILE_DIR}/${FIREWALLA_PROFILE_ID}.conf" "${peer_ip}" "${server_ip}"
   fi
 }
 
@@ -811,6 +827,89 @@ _wg_syncconf() {
   wg syncconf "${WG_IFACE_ACTUAL}" <(echo "${stripped}")
 }
 
+# Full hot-reload for a live Firewalla-managed WireGuard interface.
+#
+# `wg syncconf` alone only updates the WireGuard crypto layer.  It cannot
+# update the ip addr on the interface or the endpoint bypass route that
+# Firewalla adds on connect.  This function handles all three layers:
+#
+#   1. Add new endpoint bypass route BEFORE syncconf so there is never
+#      a window where WireGuard points at the new server but the host
+#      route is missing (which would loop handshake packets back into
+#      the tunnel and stall the connection).
+#   2. wg syncconf — atomic kernel update: private key, peer public key,
+#      and endpoint.  The PersistentKeepalive (25 s) fires a new handshake
+#      automatically; no interface down/up needed.
+#   3. Update ip addr — PIA assigns a new peer_ip on each register_key
+#      call; the old address on the interface must be replaced before the
+#      first handshake completes and traffic starts flowing.
+#   4. Remove the now-stale old bypass route.
+#   5. Rewrite .endpoint_routes so Firewalla picks up the right route if
+#      it ever reconnects (reboot, app toggle, etc.).
+#
+_fw_hot_reload() {
+  local conf="$1"          # path to new .conf (wg-quick format with Address =)
+  local new_peer_ip="$2"   # e.g. 10.74.17.213/32  — from PIA register_key
+  local new_server_ip="$3" # e.g. 181.214.139.50   — the endpoint host
+  local iface="${WG_IFACE_ACTUAL}"
+
+  # ── 1. Add new endpoint bypass route ─────────────────────────────────────
+  local old_server_ip
+  old_server_ip=$(wg show "${iface}" endpoints 2>/dev/null \
+    | awk '{print $2}' | cut -d: -f1 | head -1)
+  local gw dev
+  gw=$(ip route show default 2>/dev/null  | awk '/default via/{print $3; exit}')
+  dev=$(ip route show default 2>/dev/null | awk '/default via/{print $5; exit}')
+  if [[ -n "${gw}" && -n "${dev}" && "${old_server_ip}" != "${new_server_ip}" ]]; then
+    ip route add "${new_server_ip}/32" via "${gw}" dev "${dev}" 2>/dev/null || true
+    info "Bypass route added: ${new_server_ip}/32 via ${gw} dev ${dev}"
+  fi
+
+  # ── 2. wg syncconf ────────────────────────────────────────────────────────
+  _wg_syncconf "${conf}"
+
+  # ── 3. Update interface address ───────────────────────────────────────────
+  local old_peer_ip
+  old_peer_ip=$(ip -4 addr show dev "${iface}" 2>/dev/null \
+    | awk '/inet /{print $2; exit}')
+  if [[ -n "${old_peer_ip}" && "${old_peer_ip}" != "${new_peer_ip}" ]]; then
+    ip addr del "${old_peer_ip}" dev "${iface}" 2>/dev/null || true
+    ip addr add "${new_peer_ip}" dev "${iface}"
+    info "Interface address updated: ${old_peer_ip} → ${new_peer_ip}"
+  fi
+
+  # ── 4. Remove stale bypass route ─────────────────────────────────────────
+  if [[ -n "${old_server_ip}" && "${old_server_ip}" != "${new_server_ip}" ]]; then
+    ip route del "${old_server_ip}/32" 2>/dev/null || true
+    info "Stale bypass route removed: ${old_server_ip}/32"
+  fi
+
+  # ── 5. Rewrite .endpoint_routes for next Firewalla connect ───────────────
+  # Firewalla re-reads this file whenever it brings the interface up (reboot,
+  # app toggle).  Keep it in sync so the right bypass route is always installed.
+  if [[ -n "${gw}" && -n "${dev}" ]]; then
+    local pref=8192 ep_file p
+    for ep_file in "${FW_PROFILE_DIR}"/*.endpoint_routes; do
+      [[ -f "${ep_file}" ]] || continue
+      p=$(jq -r '.[0].pref // empty' "${ep_file}" 2>/dev/null || true)
+      [[ -n "${p}" && "${p}" -lt "${pref}" ]] && pref="${p}"
+    done
+    local routes_file="${FW_PROFILE_DIR}/${FIREWALLA_PROFILE_ID}.endpoint_routes"
+    if [[ -f "${routes_file}" ]]; then
+      printf '[{"ip":"%s","gw":"%s","dev":"%s","pref":%s}]' \
+        "${new_server_ip}" "${gw}" "${dev}" "${pref}" \
+        > "${routes_file}.new"
+      mv "${routes_file}.new" "${routes_file}"
+      # Mirror to overlay dir if it exists
+      local ov_routes="${FW_OVERLAY_DIR}/${FIREWALLA_PROFILE_ID}.endpoint_routes"
+      [[ -f "${ov_routes}" ]] && cp "${routes_file}" "${ov_routes}"
+      chown 1000:1000 "${routes_file}" "${ov_routes}" 2>/dev/null || true
+      info "Updated .endpoint_routes: ${new_server_ip} via ${gw}"
+    fi
+  fi
+}
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core setup orchestration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -861,8 +960,11 @@ do_setup() {
     deploy_to_firewalla "${fw_name}"
     if is_iface_up; then
       local fw_conf="${DATA_DIR}/${PROFILE_NAME}.conf"
-      info "Interface ${WG_IFACE_ACTUAL} is active — syncing new config"
-      _wg_syncconf "${fw_conf}"
+      local fw_peer_ip
+      fw_peer_ip=$(echo "${server_resp}" | jq -r '.peer_ip')
+      [[ "${fw_peer_ip}" != */* ]] && fw_peer_ip="${fw_peer_ip}/32"
+      info "Interface ${WG_IFACE_ACTUAL} is active — hot-reloading config"
+      _fw_hot_reload "${fw_conf}" "${fw_peer_ip}" "${server_ip}"
     fi
 
   else
@@ -1104,6 +1206,19 @@ main() {
       ;;
     start)
       load_env; check_deps
+
+      # Tee all output (stdout + stderr) to a persistent log file so the web UI
+      # can serve it, while still showing in `docker compose logs`.
+      local log_file="${DATA_DIR}/pia-wg.log"
+      exec > >(tee -a "${log_file}") 2>&1
+
+      # ── Web UI ──────────────────────────────────────────────────────────
+      local web_port="${WEB_PORT:-8080}"
+      if [[ "${web_port}" != "0" ]]; then
+        python3 /app/web_ui.py 2>&1 &
+        log "Web UI started on port ${web_port} — open http://<firewalla-ip>:${web_port}"
+      fi
+
       # Give the host network a moment to be ready before the first API call
       log "Waiting 5s for network to initialise..."
       sleep 5

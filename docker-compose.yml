@@ -3,13 +3,19 @@
 # Docs & full config reference: https://github.com/MaximumWorf/firewalla-pia_wg
 #
 # First-time setup:
+#   1. Start container:  docker compose up -d
+#   2. Open web UI at    http://<firewalla-ip>:8080
+#      → click "Generate Config for App" → paste into Firewalla app:
+#        VPN Client → Add VPN → WireGuard → paste → Save
+#   3. Find profile ID: ls -t ~/.firewalla/run/wg_profile/*.conf | head -1
+#      → set FIREWALLA_PROFILE_ID below (or via the web UI Settings tab)
+#      → docker compose up -d   (to pick up the new env var)
+#
+#   Or without the web UI (SSH):
 #   docker compose exec pia-wg /app/pia-wg-firewalla.sh generate-config
-#   → paste output into Firewalla app: VPN Client → Add VPN → WireGuard
-#   → find profile ID: ls -t ~/.firewalla/run/wg_profile/*.conf | head -1
-#   → set FIREWALLA_PROFILE_ID below, then: docker compose up -d
 #
 # Update image:    docker compose pull && docker compose up -d
-# View logs:       docker compose logs -f
+# View logs:       docker compose logs -f  (or open web UI → Logs tab)
 # Force reconnect: docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
 version: "3.9"
 
@@ -60,6 +66,11 @@ services:
       MAX_RECONNECT_ATTEMPTS: "5"
       VPN_CHECK_IP: "9.9.9.9"
       DATA_DIR: "/data/pia-wg"
+
+      # ── Web UI ─────────────────────────────────────────────────────────────
+      # Browser dashboard: http://<firewalla-ip>:8080
+      # Set to "0" to disable the web UI entirely.
+      WEB_PORT: "8080"
 
     healthcheck:
       test: ["CMD", "sh", "-c", "wg show 2>/dev/null | grep -q interface || true"]
