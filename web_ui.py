@@ -214,7 +214,7 @@ button{padding:8px 16px;border:none;border-radius:7px;cursor:pointer;font-size:1
 <li>Copy the config above (click → Ctrl+A, Ctrl+C)</li>
 <li>Firewalla app → <strong>VPN Client → Add VPN → WireGuard</strong> → paste → Save</li>
 <li>Find profile ID: <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px">ls -t ~/.firewalla/run/wg_profile/*.conf | head -1</code></li>
-<li>Set <strong>FIREWALLA_PROFILE_ID</strong> in Settings above → Save → restart container</li>
+<li>Close this modal → paste the profile ID into the <strong>Firewalla Profile ID</strong> field in Settings → <strong>Save</strong> → restart the container</li>
 </ol>
 <div class="btns">
 <button class="btn-b" onclick="copyGcfg()">Copy Config</button>

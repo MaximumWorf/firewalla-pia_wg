@@ -952,19 +952,28 @@ do_setup() {
     update_existing_profile "${server_resp}" "${server_ip}"
 
   elif [[ "${WG_MANAGED_BY_FIREWALLA}" == "true" ]]; then
-    # ── Legacy external-profile mode ─────────────────────────────────────────
-    # Create Firewalla profile files from scratch (no FIREWALLA_PROFILE_ID set).
-    local fw_name
-    fw_name=$(build_firewalla_profiles "${server_resp}" "${server_ip}" "${server_cn}")
-    deploy_to_firewalla "${fw_name}"
-    if is_iface_up; then
-      local fw_conf="${DATA_DIR}/${PROFILE_NAME}.conf"
-      local fw_peer_ip
-      fw_peer_ip=$(echo "${server_resp}" | jq -r '.peer_ip')
-      [[ "${fw_peer_ip}" != */* ]] && fw_peer_ip="${fw_peer_ip}/32"
-      info "Interface ${WG_IFACE_ACTUAL} is active — hot-reloading config"
-      _fw_hot_reload "${fw_conf}" "${fw_peer_ip}" "${server_ip}"
-    fi
+    # ── Firewalla mode, no profile ID yet ────────────────────────────────────
+    # FIREWALLA_PROFILE_ID is blank — the user hasn't pasted a config into the
+    # Firewalla app yet.  Do NOT create external profile files (PIA_WG etc.):
+    # externally-created profiles bypass Firewalla's internal registration and
+    # will never connect properly.
+    #
+    # The key registration above has already been cached.  Direct the user to
+    # the correct first-time setup flow.
+    local web_port="${WEB_PORT:-8080}"
+    warn "════════════════════════════════════════════════════════════"
+    warn " FIREWALLA_PROFILE_ID is not set — VPN will not start yet."
+    warn ""
+    warn " First-time setup:"
+    warn "  1. Open http://<firewalla-ip>:${web_port}"
+    warn "     → click 'Generate Config for App'"
+    warn "  2. Paste the config into the Firewalla app:"
+    warn "     VPN Client → Add VPN → WireGuard → paste → Save"
+    warn "  3. Find the profile ID Firewalla assigned:"
+    warn "     ls -t ~/.firewalla/run/wg_profile/*.conf | head -1"
+    warn "  4. Set FIREWALLA_PROFILE_ID in docker-compose.yml"
+    warn "     then: docker compose up -d"
+    warn "════════════════════════════════════════════════════════════"
 
   else
     # ── Standalone mode ───────────────────────────────────────────────────────
