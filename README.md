@@ -10,8 +10,8 @@ A self-contained WireGuard VPN manager for [Firewalla](https://firewalla.com) th
 |---|---|
 | **Standard & Dedicated IP** | Full support for PIA Dedicated IP tokens |
 | **Auto token refresh** | PIA tokens expire after ~24 h — the watchdog detects this and re-authenticates transparently |
-| **Always-on watchdog** | Checks handshake age and pings through the tunnel; reconnects with exponential back-off |
-| **Firewalla native** | Writes `.conf` / `.json` / `.settings` profile files that appear in the Firewalla VPN Client UI |
+| **Always-on watchdog** | Checks handshake age every 60 s; reconnects with exponential back-off if the tunnel drops |
+| **Firewalla app integration** | Updates the profile the Firewalla app created — VPN appears and is controllable in the app |
 | **Docker — no clone needed** | Pull a pre-built image, fill in two fields, run |
 | **Web UI** | Browser dashboard at `http://<firewalla-ip>:8080` — status, logs, settings, generate config |
 | **Latency-aware server selection** | Pings every server in the region, picks the fastest |
@@ -97,7 +97,7 @@ docker compose pull && docker compose up -d
 
 ### Full docker-compose.yml examples
 
-#### Standard account
+#### Standard account (Firewalla app-integration mode)
 
 ```yaml
 version: "3.9"
@@ -115,37 +115,29 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - pia-wg-data:/data/pia-wg
+      - /home/pi/.firewalla/run/wg_profile:/home/pi/.firewalla/run/wg_profile
+      - /media/home-rw/overlay/pi/.firewalla/run/wg_profile:/media/home-rw/overlay/pi/.firewalla/run/wg_profile
     environment:
       PIA_USER: "p1234567"
       PIA_PASS: "supersecret"
-      DIP_TOKEN: ""
       PIA_REGION: "us_east"
-      PROFILE_NAME: "PIA_WG"
-      WG_MANAGED_BY_FIREWALLA: "false"
-      WG_DNS_OVERRIDE: ""
-      WATCHDOG_INTERVAL: "60"
-      HANDSHAKE_MAX_AGE: "120"
-      MAX_DOWN_TIME: "300"
-      MAX_RECONNECT_ATTEMPTS: "5"
-      VPN_CHECK_IP: "9.9.9.9"
+      FIREWALLA_PROFILE_ID: "ABC12_ABC12F"  # set after pasting config into Firewalla app
+      WG_MANAGED_BY_FIREWALLA: "true"
+      WEB_PORT: "8080"
       DATA_DIR: "/data/pia-wg"
-    healthcheck:
-      test: ["CMD", "sh", "-c", "ip link show $${PROFILE_NAME:-PIA_WG} | grep -q UP"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv6.conf.all.disable_ipv6=0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pia-wg-data:
 ```
 
-#### Dedicated IP account
+#### Dedicated IP account (Firewalla app-integration mode)
 
-The only difference is `DIP_TOKEN` is set and `PIA_REGION` is ignored — the server is fixed by PIA based on which dedicated IP you purchased.
+`DIP_TOKEN` is the token string from your PIA account dashboard. `PIA_REGION` is ignored when a DIP token is set — the server is fixed by PIA.
 
 ```yaml
 version: "3.9"
@@ -163,29 +155,21 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - pia-wg-data:/data/pia-wg
+      - /home/pi/.firewalla/run/wg_profile:/home/pi/.firewalla/run/wg_profile
+      - /media/home-rw/overlay/pi/.firewalla/run/wg_profile:/media/home-rw/overlay/pi/.firewalla/run/wg_profile
     environment:
       PIA_USER: "p1234567"
       PIA_PASS: "supersecret"
-      DIP_TOKEN: "pia_dip_abc123xyz..."   # from PIA account dashboard
-      PIA_REGION: ""                       # ignored when DIP_TOKEN is set
-      PROFILE_NAME: "PIA_DIP"
-      WG_MANAGED_BY_FIREWALLA: "false"
-      WG_DNS_OVERRIDE: ""
-      WATCHDOG_INTERVAL: "60"
-      HANDSHAKE_MAX_AGE: "120"
-      MAX_DOWN_TIME: "300"
-      MAX_RECONNECT_ATTEMPTS: "5"
-      VPN_CHECK_IP: "9.9.9.9"
+      DIP_TOKEN: "pia_dip_abc123xyz..."    # from PIA account dashboard
+      FIREWALLA_PROFILE_ID: "ABC12_ABC12F" # set after pasting config into Firewalla app
+      WG_MANAGED_BY_FIREWALLA: "true"
+      WEB_PORT: "8080"
       DATA_DIR: "/data/pia-wg"
-    healthcheck:
-      test: ["CMD", "sh", "-c", "ip link show $${PROFILE_NAME:-PIA_DIP} | grep -q UP"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv6.conf.all.disable_ipv6=0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pia-wg-data:
@@ -254,15 +238,19 @@ sudo ./pia-wg-firewalla.sh start   # setup + watchdog (runs in foreground)
 | `DIP_TOKEN` | *(blank)* | Dedicated IP token from your PIA account; blank = standard shared-IP account |
 | `DIP_HOSTNAME` | *(blank)* | Manual server override — only needed if the automatic API lookup fails |
 | `DIP_SERVER_IP` | *(blank)* | Manual server IP override — only needed if the automatic API lookup fails |
+| `DIP_PORT` | `1337` | WireGuard port for Dedicated IP connections |
 | `PIA_REGION` | `us_east` | Server region; ignored when `DIP_TOKEN` is set |
-| `PROFILE_NAME` | `PIA_WG` | WireGuard interface name and Firewalla profile name (max 15 chars) |
-| `WG_MANAGED_BY_FIREWALLA` | `false` | `true` = Firewalla owns the interface; `false` = script uses wg-quick |
+| `FIREWALLA_PROFILE_ID` | *(blank)* | Hash-based profile ID assigned by Firewalla (e.g. `ABC12_ABC12F`); set after pasting the config into the app |
+| `WG_MANAGED_BY_FIREWALLA` | `true` | `true` = Firewalla owns the interface (recommended); `false` = script uses wg-quick directly |
+| `PROFILE_NAME` | `PIA_WG` | Legacy fallback profile name; only used when `FIREWALLA_PROFILE_ID` is blank |
 | `WG_DNS_OVERRIDE` | *(blank)* | Override DNS (e.g. `1.1.1.1,1.0.0.1`); blank uses PIA's servers |
+| `WEB_PORT` | `8080` | Port for the web UI dashboard; set to `0` to disable |
 | `WATCHDOG_INTERVAL` | `60` | Seconds between watchdog health checks |
 | `HANDSHAKE_MAX_AGE` | `120` | Stale handshake threshold in seconds |
 | `MAX_DOWN_TIME` | `300` | Seconds of continuous downtime before reconnecting |
 | `MAX_RECONNECT_ATTEMPTS` | `5` | Reconnect attempts before a 5-minute back-off pause |
-| `VPN_CHECK_IP` | `9.9.9.9` | IP to ping through the tunnel for connectivity checks |
+| `KEY_REFRESH_INTERVAL` | `150` | Seconds between PIA key re-registrations when interface is managed by Firewalla |
+| `VPN_CHECK_IP` | `9.9.9.9` | IP to ping through the tunnel for connectivity checks (standalone mode only) |
 | `DATA_DIR` | `/data/pia-wg` | State directory (keys, token, server list cache) |
 
 ---
@@ -273,12 +261,14 @@ sudo ./pia-wg-firewalla.sh start   # setup + watchdog (runs in foreground)
 ./pia-wg-firewalla.sh <command> [options]
 
 Commands:
-  start          Setup + run watchdog (use for Docker / systemd)
-  setup          One-time setup only
-  reconnect      Force fresh token + reconnect immediately
-  watchdog       Run watchdog loop only (VPN must already be active)
-  status         Show tunnel health, handshake age, token TTL, server info
-  list-regions   List all available PIA WireGuard regions
+  start            Setup + run watchdog (use for Docker / systemd)
+  generate-config  Register a key with PIA and print the wg-quick config
+                   block to paste into the Firewalla app (first-time setup)
+  setup            One-time setup only
+  reconnect        Force fresh token + reconnect immediately
+  watchdog         Run watchdog loop only (VPN must already be active)
+  status           Show tunnel health, handshake age, token TTL, server info
+  list-regions     List all available PIA WireGuard regions
 
 Options:
   --new-keys     Regenerate WireGuard keypair
@@ -294,21 +284,23 @@ Options:
 ```
 pia-wg-firewalla.sh start
 │
-├─ 1. Generate or reuse WireGuard keypair  →  /data/pia-wg/private.key
-├─ 2. Authenticate with PIA API            →  token cached for 20 h
+├─ 1. Generate or reuse WireGuard keypair      →  /data/pia-wg/private.key
+├─ 2. Authenticate with PIA API                →  token cached for 20 h
 ├─ 3a. Standard: fetch server list, ping all servers, pick fastest
 │   3b. Dedicated IP: query PIA DIP API for assigned server
-├─ 4. Register WireGuard pubkey with server
-├─ 5. Write Firewalla profile files:
-│       PIA_WG.conf  /  PIA_WG.json  /  PIA_WG.settings
-│       → deployed to /home/pi/.firewalla/run/wg_profile/
-├─ 6. wg-quick up  (standalone)  /  wg syncconf  (Firewalla mode)
+├─ 4. Register WireGuard pubkey with PIA server
+├─ 5a. FIREWALLA_PROFILE_ID set:
+│       Update the app-created profile files in place:
+│         <ID>.conf / <ID>.json / <ID>.settings / <ID>.endpoint_routes
+│       If interface is up: hot-reload (ip addr + bypass route + wg syncconf)
+│   5b. FIREWALLA_PROFILE_ID blank:
+│       Log first-time setup instructions and wait
 │
 └─ Watchdog loop (runs forever)
      every 60 s:
-       ├─ handshake age < 120 s?  ──── yes ──► ping 9.9.9.9 through tunnel
-       │                                            OK → reset down_time
-       │                                            FAIL → down_time += 60
+       ├─ interface down (Firewalla mode)?
+       │    key age > 150 s → re-register key so it's fresh when user connects
+       ├─ handshake age < 120 s?  ──── yes ──► healthy, reset down_time
        └─ no / stale              ──────────► down_time += 60
             at 300 s total:
               force new PIA token + reconnect
@@ -318,17 +310,20 @@ pia-wg-firewalla.sh start
 
 ### Firewalla profile files
 
-Three files are written per profile and deployed to `/home/pi/.firewalla/run/wg_profile/`:
+When `FIREWALLA_PROFILE_ID` is set, the container updates the four files Firewalla created in `/home/pi/.firewalla/run/wg_profile/` on every key refresh:
 
 | File | Purpose |
 |---|---|
-| `PIA_WG.conf` | wg-quick format config — Firewalla reads this to bring up the tunnel |
-| `PIA_WG.json` | Firewalla peer metadata: public key, endpoint, allowed IPs, addresses |
-| `PIA_WG.settings` | Routing policy: `overrideDefaultRoute`, `routeDNS`, `strictVPN` |
+| `<ID>.conf` | wg-quick format config with `Address =` — Firewalla uses this to bring up the tunnel and assign the interface IP |
+| `<ID>.json` | Peer metadata: public key, endpoint, allowed IPs, addresses |
+| `<ID>.settings` | Routing policy including `serverDDNS` (endpoint bypass route) and `serverVPNPort` |
+| `<ID>.endpoint_routes` | Static host route ensuring handshake packets reach the PIA server outside the tunnel |
 
-### Token refresh
+### Token and key refresh
 
-PIA tokens last ~24 hours. The watchdog accumulates downtime and, once `MAX_DOWN_TIME` is reached, forces a fresh token and re-registers the WireGuard key before reconnecting — no manual intervention needed.
+PIA tokens last ~24 hours; WireGuard key registrations expire if no handshake arrives within ~3 minutes. The container handles both:
+- **Key registration** is refreshed every 150 s while the interface is down, so it's always fresh when Firewalla connects
+- **Token refresh** is forced when the watchdog triggers a reconnect after `MAX_DOWN_TIME` of continuous downtime
 
 ---
 
@@ -345,8 +340,8 @@ docker compose exec pia-wg /app/pia-wg-firewalla.sh reconnect
 sudo ./pia-wg-firewalla.sh reconnect --new-token
 ```
 
-**Profile not appearing in the Firewalla app**
-Check that the three profile files exist in `/home/pi/.firewalla/run/wg_profile/` and are owned by `pi`. Verify `WG_MANAGED_BY_FIREWALLA` is set to `true` in your compose file.
+**`FIREWALLA_PROFILE_ID is not set` in logs / VPN not starting**
+Follow the first-time setup flow: open the web UI → **Generate Config for App** → paste into Firewalla app (VPN Client → Add VPN → WireGuard) → **enable the VPN once** in the app → run `ls -t ~/.firewalla/run/wg_profile/*.conf | head -1` to find the profile ID → set `FIREWALLA_PROFILE_ID` in `docker-compose.yml` → `docker compose up -d`.
 
 **Handshake never completes**
 UDP port 1337 may be blocked by your ISP or upstream router. Try a different region:
