@@ -662,22 +662,22 @@ update_existing_profile() {
     # Write wg-quick format conf WITH Address.
     # Firewalla parses Address to run `ip addr add <peer_ip> dev <iface>` before
     # calling `wg setconf` (which strips wg-quick extensions).
+    # Write directly — avoid .new+mv which fails with "Stale file handle" on
+    # Firewalla's overlayfs after a container restart.
     {
       printf '[Interface]\nPrivateKey = %s\nAddress = %s\n' "${privkey}" "${peer_ip}"
       # Preserve any DNS line the user may have added via the app
       grep -E '^DNS[[:space:]]*=' "${target_conf}" 2>/dev/null || true
       printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' \
         "${server_key}" "${server_ip}" "${server_port}"
-    } > "${target_conf}.new"
-    mv "${target_conf}.new" "${target_conf}"
+    } > "${target_conf}"
     chmod 600 "${target_conf}"
 
     # Update .json — peer public key and endpoint change on each registration
     if [[ -f "${target_json}" ]]; then
       printf '{"peers":[{"publicKey":"%s","endpoint":"%s:%s","persistentKeepalive":25,"allowedIPs":["0.0.0.0/0"]}],"addresses":["%s"],"privateKey":"%s","dns":%s}\n' \
         "${server_key}" "${server_ip}" "${server_port}" "${peer_ip}" "${privkey}" "${dns_json}" \
-        > "${target_json}.new"
-      mv "${target_json}.new" "${target_json}"
+        > "${target_json}"
       chmod 600 "${target_json}"
     fi
 
@@ -688,10 +688,10 @@ update_existing_profile() {
     # (displayName, device routing rules, overrideDefaultRoute, strictVPN, etc.).
     local target_settings="${fw_dir}/${FIREWALLA_PROFILE_ID}.settings"
     if [[ -f "${target_settings}" ]]; then
-      jq --arg ip "${server_ip}" --argjson port "${server_port}" \
-        '.serverDDNS = $ip | .serverVPNPort = $port' \
-        "${target_settings}" > "${target_settings}.new"
-      mv "${target_settings}.new" "${target_settings}"
+      local updated_settings
+      updated_settings=$(jq --arg ip "${server_ip}" --argjson port "${server_port}" \
+        '.serverDDNS = $ip | .serverVPNPort = $port' "${target_settings}")
+      printf '%s\n' "${updated_settings}" > "${target_settings}"
       chmod 644 "${target_settings}"
     fi
 
@@ -898,8 +898,7 @@ _fw_hot_reload() {
     if [[ -f "${routes_file}" ]]; then
       printf '[{"ip":"%s","gw":"%s","dev":"%s","pref":%s}]' \
         "${new_server_ip}" "${gw}" "${dev}" "${pref}" \
-        > "${routes_file}.new"
-      mv "${routes_file}.new" "${routes_file}"
+        > "${routes_file}"
       # Mirror to overlay dir if it exists
       local ov_routes="${FW_OVERLAY_DIR}/${FIREWALLA_PROFILE_ID}.endpoint_routes"
       [[ -f "${ov_routes}" ]] && cp "${routes_file}" "${ov_routes}"
