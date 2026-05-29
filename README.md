@@ -74,6 +74,8 @@ Once the container is running, open **`http://<firewalla-ip>:8080`** in any brow
 
 To disable the web UI, set `WEB_PORT: "0"` in `docker-compose.yml`.
 
+> **Security note:** The web UI has no authentication. It is accessible to any device on your LAN but is **not** exposed to the internet — Firewalla's firewall blocks unsolicited inbound connections from the WAN by default. Do not set up a port forward for port 8080. The Settings page can read and write your PIA credentials, so treat access to this port the same as SSH access to the Firewalla.
+
 ### Useful commands
 
 ```bash
