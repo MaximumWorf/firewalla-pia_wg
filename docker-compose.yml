@@ -79,5 +79,11 @@ services:
       retries: 3
       start_period: 30s
 
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   pia-wg-data:
