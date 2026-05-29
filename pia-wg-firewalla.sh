@@ -1054,7 +1054,10 @@ run_watchdog() {
       if (( hs_age > HANDSHAKE_MAX_AGE )); then
         warn "Stale handshake: ${hs_age}s (max ${HANDSHAKE_MAX_AGE}s)"
         (( down_time += WATCHDOG_INTERVAL ))
-      elif ! check_connectivity; then
+      elif [[ "${WG_MANAGED_BY_FIREWALLA}" != "true" ]] && ! check_connectivity; then
+        # In Firewalla mode, skip the ping: Firewalla uses policy routing so the
+        # container's own traffic doesn't route through the VPN interface.
+        # A fresh handshake (checked above) is sufficient proof the tunnel is live.
         warn "No ping response from ${VPN_CHECK_IP} through ${WG_IFACE_ACTUAL}"
         (( down_time += WATCHDOG_INTERVAL ))
       else
